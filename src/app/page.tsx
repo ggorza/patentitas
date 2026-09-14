@@ -28,7 +28,6 @@ import {
   ArrowUp,
   ArrowDown,
   MapPin,
-  Globe,
 } from 'lucide-react';
 
 interface Registro {
@@ -50,12 +49,10 @@ export default function Dashboard() {
   const [tableData, setTableData] = useState<Registro[]>([]);
   const [totalFilas, setTotalFilas] = useState(0);
 
-  // Filtros
+  // Filtros activos
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedAnio, setSelectedAnio] = useState('TODOS');
-  const [selectedMarca, setSelectedMarca] = useState('TODAS');
   const [selectedProvincia, setSelectedProvincia] = useState('TODAS');
-  const [selectedOrigen, setSelectedOrigen] = useState('TODOS');
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 12;
 
@@ -63,11 +60,9 @@ export default function Dashboard() {
   const [sortColumn, setSortColumn] = useState<SortColumn>('cantidad');
   const [sortAscending, setSortAscending] = useState(false);
 
-  // Listas para los dropdowns
+  // Listas de selección
   const [aniosDisponibles, setAniosDisponibles] = useState<string[]>(['TODOS']);
-  const [marcasDisponibles, setMarcasDisponibles] = useState<string[]>(['TODAS']);
   const [provinciasDisponibles, setProvinciasDisponibles] = useState<string[]>(['TODAS']);
-  const [origenesDisponibles, setOrigenesDisponibles] = useState<string[]>(['TODOS']);
 
   // Métricas y gráficos
   const [totalPatentamientos, setTotalPatentamientos] = useState(0);
@@ -75,9 +70,9 @@ export default function Dashboard() {
   const [barChartData, setBarChartData] = useState<{ marca: string; cantidad: number }[]>([]);
   const [lineChartData, setLineChartData] = useState<{ anio: number; cantidad: number }[]>([]);
 
-  // 1. Cargar opciones de los dropdowns una sola vez
+  // 1. Cargar opciones iniciales (años y provincias)
   useEffect(() => {
-    async function loadDimensions() {
+    async function loadFiltrosIniciales() {
       const { data: totales } = await supabase
         .from('vista_totales_anuales')
         .select('anio')
@@ -87,48 +82,43 @@ export default function Dashboard() {
         setAniosDisponibles(['TODOS', ...totales.map((t: { anio: number }) => String(t.anio))]);
       }
 
-      const { data: dims } = await supabase
-        .from('vista_dimensiones_filtro')
-        .select('*');
+      const { data: provsData } = await supabase
+        .from('patentamientos_resumen')
+        .select('provincia')
+        .limit(1000);
 
-      if (dims) {
-        const marcas = Array.from(new Set(dims.map((d) => d.marca))).filter(Boolean).sort();
-        const provs = Array.from(new Set(dims.map((d) => d.provincia))).filter(Boolean).sort();
-        const origs = Array.from(new Set(dims.map((d) => d.origen))).filter(Boolean).sort();
-
-        setMarcasDisponibles(['TODAS', ...marcas]);
+      if (provsData) {
+        const provs = Array.from(new Set(provsData.map((d: { provincia: string }) => d.provincia)))
+          .filter(Boolean)
+          .sort();
         setProvinciasDisponibles(['TODAS', ...provs]);
-        setOrigenesDisponibles(['TODOS', ...origs]);
       }
     }
-    loadDimensions();
+    loadFiltrosIniciales();
   }, []);
 
-  // 2. Cargar métricas agregadas y datos para gráficos respetando filtros
-  const loadAggregatedData = useCallback(async () => {
+  // 2. Carga agregada para KPIs y Gráficos
+  const loadMetricsAndCharts = useCallback(async () => {
     setLoading(true);
 
     let query = supabase.from('patentamientos_resumen').select('anio, marca, cantidad');
 
     if (selectedAnio !== 'TODOS') query = query.eq('anio', Number(selectedAnio));
-    if (selectedMarca !== 'TODAS') query = query.eq('marca', selectedMarca);
     if (selectedProvincia !== 'TODAS') query = query.eq('provincia', selectedProvincia);
-    if (selectedOrigen !== 'TODOS') query = query.eq('origen', selectedOrigen);
 
     const cleaned = searchTerm.trim();
     if (cleaned.length > 0) {
       query = query.or(`marca.ilike.%${cleaned}%,modelo.ilike.%${cleaned}%`);
     }
 
-    // Limitamos a un muestreo representativo alto para agregaciones rápidas
-    const { data: rows, error } = await query.limit(50000);
+    const { data: rows, error } = await query.limit(25000);
 
     if (!error && rows) {
       let total = 0;
       const porMarca: Record<string, number> = {};
       const porAnio: Record<number, number> = {};
 
-      rows.forEach((r) => {
+      rows.forEach((r: { anio: number; marca: string; cantidad: number }) => {
         const qty = Number(r.cantidad);
         total += qty;
         porMarca[r.marca] = (porMarca[r.marca] || 0) + qty;
@@ -137,7 +127,7 @@ export default function Dashboard() {
 
       setTotalPatentamientos(total);
 
-      // Bar Chart: Top 10 marcas
+      // Top 10 Marcas
       const sortedMarcas = Object.entries(porMarca)
         .map(([marca, cantidad]) => ({ marca, cantidad }))
         .sort((a, b) => b.cantidad - a.cantidad);
@@ -150,7 +140,7 @@ export default function Dashboard() {
         setBarChartData([]);
       }
 
-      // Line Chart: Evolución interanual
+      // Evolución Interanual
       const sortedAnios = Object.entries(porAnio)
         .map(([anio, cantidad]) => ({ anio: Number(anio), cantidad }))
         .sort((a, b) => a.anio - b.anio);
@@ -159,9 +149,9 @@ export default function Dashboard() {
     }
 
     setLoading(false);
-  }, [selectedAnio, selectedMarca, selectedProvincia, selectedOrigen, searchTerm]);
+  }, [selectedAnio, selectedProvincia, searchTerm]);
 
-  // 3. Cargar tabla paginada con ordenamiento
+  // 3. Carga paginada de la tabla
   const loadTableData = useCallback(async () => {
     setTableLoading(true);
     const from = (currentPage - 1) * pageSize;
@@ -170,9 +160,7 @@ export default function Dashboard() {
     let query = supabase.from('patentamientos_resumen').select('*', { count: 'estimated' });
 
     if (selectedAnio !== 'TODOS') query = query.eq('anio', Number(selectedAnio));
-    if (selectedMarca !== 'TODAS') query = query.eq('marca', selectedMarca);
     if (selectedProvincia !== 'TODAS') query = query.eq('provincia', selectedProvincia);
-    if (selectedOrigen !== 'TODOS') query = query.eq('origen', selectedOrigen);
 
     const cleaned = searchTerm.trim();
     if (cleaned.length > 0) {
@@ -200,15 +188,15 @@ export default function Dashboard() {
     }
 
     setTableLoading(false);
-  }, [selectedAnio, selectedMarca, selectedProvincia, selectedOrigen, searchTerm, currentPage, sortColumn, sortAscending]);
+  }, [selectedAnio, selectedProvincia, searchTerm, currentPage, sortColumn, sortAscending]);
 
   useEffect(() => {
     const handler = setTimeout(() => {
-      loadAggregatedData();
+      loadMetricsAndCharts();
       loadTableData();
     }, 250);
     return () => clearTimeout(handler);
-  }, [loadAggregatedData, loadTableData]);
+  }, [loadMetricsAndCharts, loadTableData]);
 
   const handleSort = (column: SortColumn) => {
     if (sortColumn === column) {
@@ -250,7 +238,7 @@ export default function Dashboard() {
         </div>
         <button
           onClick={() => {
-            loadAggregatedData();
+            loadMetricsAndCharts();
             loadTableData();
           }}
           disabled={loading || tableLoading}
@@ -299,10 +287,10 @@ export default function Dashboard() {
         </div>
       </section>
 
-      {/* Filtros Completos */}
-      <section className="bg-slate-900/40 p-4 border border-slate-800 rounded-xl space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
+      {/* Filtros Simplificados */}
+      <section className="bg-slate-900/40 p-4 border border-slate-800 rounded-xl">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="md:col-span-1">
             <label className="block text-xs font-semibold text-slate-400 mb-1">
               Buscar Marca o Modelo
             </label>
@@ -310,7 +298,7 @@ export default function Dashboard() {
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <input
                 type="text"
-                placeholder="Ej: Hilux, Cronos, 208, Corolla, Amarok..."
+                placeholder="Ej: Hilux, Cronos, 208, Amarok..."
                 value={searchTerm}
                 onChange={(e) => {
                   setSearchTerm(e.target.value);
@@ -332,96 +320,54 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-slate-400 mb-1">Año</label>
-              <div className="relative">
-                <Calendar className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-3" />
-                <select
-                  value={selectedAnio}
-                  onChange={(e) => {
-                    setSelectedAnio(e.target.value);
-                    setCurrentPage(1);
-                  }}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-8 pr-2 py-2 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
-                >
-                  {aniosDisponibles.map((a) => (
-                    <option key={a} value={a}>
-                      {a === 'TODOS' ? 'Todos' : a}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-400 mb-1">Marca</label>
+          <div>
+            <label className="block text-xs font-semibold text-slate-400 mb-1">Filtrar por Año</label>
+            <div className="relative">
+              <Calendar className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <select
-                value={selectedMarca}
+                value={selectedAnio}
                 onChange={(e) => {
-                  setSelectedMarca(e.target.value);
+                  setSelectedAnio(e.target.value);
                   setCurrentPage(1);
                 }}
-                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-xs text-slate-200 focus:outline-none focus:border-blue-500 truncate"
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
               >
-                {marcasDisponibles.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
+                {aniosDisponibles.map((a) => (
+                  <option key={a} value={a}>
+                    {a === 'TODOS' ? 'Todos los años' : a}
                   </option>
                 ))}
               </select>
             </div>
+          </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-400 mb-1">Provincia</label>
-              <div className="relative">
-                <MapPin className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-3" />
-                <select
-                  value={selectedProvincia}
-                  onChange={(e) => {
-                    setSelectedProvincia(e.target.value);
-                    setCurrentPage(1);
-                  }}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-8 pr-2 py-2 text-xs text-slate-200 focus:outline-none focus:border-blue-500 truncate"
-                >
-                  {provinciasDisponibles.map((p) => (
-                    <option key={p} value={p}>
-                      {p}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-400 mb-1">Origen</label>
-              <div className="relative">
-                <Globe className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-3" />
-                <select
-                  value={selectedOrigen}
-                  onChange={(e) => {
-                    setSelectedOrigen(e.target.value);
-                    setCurrentPage(1);
-                  }}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-8 pr-2 py-2 text-xs text-slate-200 focus:outline-none focus:border-blue-500 truncate"
-                >
-                  {origenesDisponibles.map((o) => (
-                    <option key={o} value={o}>
-                      {o}
-                    </option>
-                  ))}
-                </select>
-              </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-400 mb-1">Filtrar por Provincia</label>
+            <div className="relative">
+              <MapPin className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+              <select
+                value={selectedProvincia}
+                onChange={(e) => {
+                  setSelectedProvincia(e.target.value);
+                  setCurrentPage(1);
+                }}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 truncate"
+              >
+                {provinciasDisponibles.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
         </div>
       </section>
 
-      {/* Gráficos: Top 10 Marcas + Evolución Interanual */}
+      {/* Gráficos */}
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Gráfico 1: Top 10 */}
         <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-6">
-          <h2 className="text-lg font-semibold text-white mb-4">Top Marcas (Selección Actual)</h2>
+          <h2 className="text-lg font-semibold text-white mb-4">Top Marcas</h2>
           <div className="h-72 w-full">
             {barChartData.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
@@ -444,7 +390,6 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Gráfico 2: Evolución Interanual */}
         <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-6">
           <h2 className="text-lg font-semibold text-white mb-4">Evolución Anual (Unidades)</h2>
           <div className="h-72 w-full">
