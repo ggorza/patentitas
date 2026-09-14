@@ -108,7 +108,7 @@ export default function Dashboard() {
     setLoading(false);
   }, [selectedAnio]);
 
-  // Carga de la tabla paginada con búsqueda robusta
+  // Carga de la tabla paginada con conteo estimado para evitar timeouts
   const loadTableData = useCallback(async () => {
     setTableLoading(true);
     const from = (currentPage - 1) * pageSize;
@@ -116,31 +116,30 @@ export default function Dashboard() {
 
     let query = supabase
       .from('patentamientos_resumen')
-      .select('*', { count: 'exact' });
+      .select('*', { count: 'estimated' });
 
-    // Filtro por año
     if (selectedAnio !== 'TODOS') {
       query = query.eq('anio', Number(selectedAnio));
     }
 
-    // Filtro por texto: sintaxis estricta PostgREST con wildcard '*'
-    const cleanedSearch = searchTerm.trim();
-    if (cleanedSearch.length > 0) {
-      const pattern = `*${cleanedSearch}*`;
-      query = query.or(`marca.ilike.${pattern},modelo.ilike.${pattern}`);
+    const cleaned = searchTerm.trim();
+    if (cleaned.length > 0) {
+      query = query.or(`marca.ilike.%${cleaned}%,modelo.ilike.%${cleaned}%`);
     }
 
     query = query.order('cantidad', { ascending: false }).range(from, to);
 
     const { data: rows, count, error } = await query;
 
-    if (!error && rows) {
-      setTableData(rows);
-      setTotalFilas(count || 0);
-    } else {
+    if (error) {
+      console.error('Error en búsqueda:', error.message);
       setTableData([]);
       setTotalFilas(0);
+    } else if (rows) {
+      setTableData(rows);
+      setTotalFilas(count || rows.length);
     }
+
     setTableLoading(false);
   }, [selectedAnio, searchTerm, currentPage]);
 
@@ -148,11 +147,10 @@ export default function Dashboard() {
     loadGlobalMetrics();
   }, [loadGlobalMetrics]);
 
-  // Debounce simple para no saturar al tipear
   useEffect(() => {
     const handler = setTimeout(() => {
       loadTableData();
-    }, 250);
+    }, 300);
     return () => clearTimeout(handler);
   }, [loadTableData]);
 
@@ -222,7 +220,7 @@ export default function Dashboard() {
           <p className="text-2xl font-bold text-white mt-2">
             {tableLoading ? '...' : totalFilas.toLocaleString('es-AR')}
           </p>
-          <span className="text-xs text-slate-500 mt-1 block">Combinaciones encontradas</span>
+          <span className="text-xs text-slate-500 mt-1 block">Combinaciones estimadas</span>
         </div>
       </section>
 
@@ -240,7 +238,7 @@ export default function Dashboard() {
               value={searchTerm}
               onChange={(e) => {
                 setSearchTerm(e.target.value);
-                setCurrentPage(1); // Resetea siempre a la página 1 al cambiar el texto
+                setCurrentPage(1);
               }}
               className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-9 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
             />
@@ -266,7 +264,7 @@ export default function Dashboard() {
               value={selectedAnio}
               onChange={(e) => {
                 setSelectedAnio(e.target.value);
-                setCurrentPage(1); // Resetea a página 1 al cambiar el año
+                setCurrentPage(1);
               }}
               className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
             >
@@ -312,7 +310,7 @@ export default function Dashboard() {
         <div className="p-4 border-b border-slate-800 flex justify-between items-center">
           <h2 className="text-lg font-semibold text-white">Detalle de Patentamientos</h2>
           <span className="text-xs text-slate-400">
-            Página {currentPage} de {totalPages} ({totalFilas.toLocaleString('es-AR')} combinaciones)
+            Página {currentPage} de {totalPages}
           </span>
         </div>
         <div className="overflow-x-auto">
