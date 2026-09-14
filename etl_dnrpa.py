@@ -16,38 +16,41 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 CKAN_PACKAGE_URL = "https://datos.jus.gob.ar/api/3/action/package_show?id=inscripciones-iniciales-de-autos"
 
-# Rango de años históricos a procesar (podés ampliarlo según necesidad)
+# Rango histórico
 ANIO_DESDE = 2022
 
 
-def obtener_archivos_historicos():
-    print(f"Consultando API CKAN para recursos desde el año {ANIO_DESDE}...")
-    resp = requests.get(CKAN_PACKAGE_URL, timeout=30)
+def obtener_todos_los_archivos():
+    print(f"Consultando catálogo CKAN para recursos desde {ANIO_DESDE}...")
+    resp = requests.get(CKAN_PACKAGE_URL, timeout=45)
     resp.raise_for_status()
     data = resp.json()
 
     recursos = data.get("result", {}).get("resources", [])
-    archivos_por_anio = {}
+    archivos = []
 
     for r in recursos:
         url = r.get("url", "")
         name = r.get("name", "")
         if url.endswith(".csv") or url.endswith(".zip"):
-            match = re.search(r"\b(201\d|202\d)\b", name)
+            match = re.search(r"\b(201\d|202\d)\b", name) or re.search(r"(201\d|202\d)", url)
             if match:
                 anio = int(match.group(1))
                 if anio >= ANIO_DESDE:
-                    # Guardar el recurso más representativo del año
-                    archivos_por_anio[anio] = {"anio": anio, "name": name, "url": url}
+                    archivos.append({"anio": anio, "name": name, "url": url})
 
-    lista_ordenada = [archivos_por_anio[a] for a in sorted(archivos_por_anio.keys())]
-    print(f"Años detectados para procesar: {[x['anio'] for x in lista_ordenada]}")
-    return lista_ordenada
+    # Ordenar cronológicamente por año y nombre de archivo
+    archivos.sort(key=lambda x: (x["anio"], x["name"]))
+    print(f"Total de archivos/meses detectados para procesar: {len(archivos)}")
+    for a in archivos:
+        print(f" - {a['name']} ({a['anio']})")
+    return archivos
 
 
-def descargar_y_obtener_csv(url: str, temp_dir: str) -> str:
+def descargar_y_obtener_csv(url: str, temp_dir: str) -> list:
+    """Descarga el recurso y devuelve una lista de rutas a archivos CSV extraídos."""
     local_path = os.path.join(temp_dir, "descarga_temp")
-    print(f"Descargando desde: {url}...")
+    print(f"Descargando: {url}...")
 
     with requests.get(url, stream=True, timeout=180) as r:
         r.raise_for_status()
@@ -56,20 +59,22 @@ def descargar_y_obtener_csv(url: str, temp_dir: str) -> str:
                 if chunk:
                     f.write(chunk)
 
+    csv_paths = []
     if url.endswith(".zip") or zipfile.is_zipfile(local_path):
-        print("Descomprimiendo ZIP...")
+        print("Extrayendo ZIP...")
         with zipfile.ZipFile(local_path, "r") as z:
             z.extractall(temp_dir)
             for file_name in z.namelist():
                 if file_name.lower().endswith(".csv"):
-                    return os.path.join(temp_dir, file_name)
-        raise RuntimeError("No se encontró archivo CSV dentro del ZIP.")
+                    csv_paths.append(os.path.join(temp_dir, file_name))
+    elif local_path.lower().endswith(".csv") or url.endswith(".csv"):
+        csv_paths.append(local_path)
 
-    return local_path
+    return csv_paths
 
 
-def procesar_y_cargar(ruta_csv_local: str, anio_objetivo: int):
-    print(f"--- Procesando DuckDB para el año {anio_objetivo} ---")
+def procesar_y_cargar(ruta_csv_local: str, etiqueta: str):
+    print(f"DuckDB analizando archivo: {os.path.basename(ruta_csv_local)} [{etiqueta}]")
     con = duckdb.connect(database=":memory:")
 
     try:
@@ -114,7 +119,6 @@ def procesar_y_cargar(ruta_csv_local: str, anio_objetivo: int):
             "    CAST(COUNT(*) AS INTEGER) AS cantidad "
             "FROM raw_data "
             "WHERE fecha_parsed IS NOT NULL "
-            f"  AND YEAR(fecha_parsed) = {anio_objetivo} "
             "  AND marca IS NOT NULL "
             "  AND marca != '' "
             "GROUP BY 1, 2, 3, 4, 5, 6"
@@ -122,15 +126,10 @@ def procesar_y_cargar(ruta_csv_local: str, anio_objetivo: int):
 
         df_resumen = con.execute(query).fetchdf()
         total_filas = len(df_resumen)
-        print(f"Filas agregadas generadas para {anio_objetivo}: {total_filas}")
 
         if total_filas == 0:
-            print(f"Aviso: Sin datos válidos para {anio_objetivo}.")
+            print(f"Sin registros válidos en {os.path.basename(ruta_csv_local)}.")
             return
-
-        # Limpiar registros previos del año para evitar duplicación
-        print(f"Limpiando datos existentes de {anio_objetivo} en Supabase...")
-        supabase.table("patentamientos_resumen").delete().eq("anio", anio_objetivo).execute()
 
         df_resumen['anio'] = df_resumen['anio'].astype(int)
         df_resumen['mes'] = df_resumen['mes'].astype(int)
@@ -141,23 +140,31 @@ def procesar_y_cargar(ruta_csv_local: str, anio_objetivo: int):
         for i in range(0, total_filas, tamano_batch):
             batch = registros[i:i + tamano_batch]
             supabase.table("patentamientos_resumen").insert(batch).execute()
-            print(f"[{anio_objetivo}] Subidos {min(i + tamano_batch, total_filas)}/{total_filas} registros...")
 
-        print(f"Carga completa del año {anio_objetivo}.")
+        print(f"Insertadas {total_filas} filas agrupadas de {os.path.basename(ruta_csv_local)}.")
 
     except Exception as e:
-        print(f"Error procesando año {anio_objetivo}:")
+        print(f"Error procesando {ruta_csv_local}:")
         traceback.print_exc()
-        raise e
     finally:
         con.close()
 
 
 if __name__ == "__main__":
-    archivos = obtener_archivos_historicos()
-    for recurso in archivos:
-        print(f"\n==================== INICIANDO {recurso['anio']} ====================")
+    archivos = obtener_todos_los_archivos()
+
+    # Purgar tabla para evitar duplicar datos de corridas anteriores
+    print("Vaciando tabla patentamientos_resumen para carga completa limpia...")
+    supabase.table("patentamientos_resumen").delete().neq("id", 0).execute()
+
+    for item in archivos:
+        print(f"\nProcesando recurso: {item['name']} ({item['anio']})")
         with tempfile.TemporaryDirectory() as temp_dir:
-            csv_path = descargar_y_obtener_csv(recurso["url"], temp_dir)
-            procesar_y_cargar(csv_path, recurso["anio"])
-    print("\nProceso histórico finalizado exitosamente.")
+            try:
+                csv_list = descargar_y_obtener_csv(item["url"], temp_dir)
+                for csv_path in csv_list:
+                    procesar_y_cargar(csv_path, item["name"])
+            except Exception as err:
+                print(f"Fallo descarga/extracción de {item['name']}: {err}")
+
+    print("\nCarga masiva histórica finalizada exitosamente.")
