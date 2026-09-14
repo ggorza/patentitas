@@ -10,8 +10,20 @@ import {
   Tooltip,
   ResponsiveContainer,
   CartesianGrid,
+  LineChart,
+  Line,
 } from 'recharts';
-import { Car, Award, MapPin, Layers, RefreshCw, ChevronLeft, ChevronRight, Search } from 'lucide-react';
+import {
+  Car,
+  Award,
+  MapPin,
+  Layers,
+  RefreshCw,
+  ChevronLeft,
+  ChevronRight,
+  Search,
+  Calendar,
+} from 'lucide-react';
 
 interface Registro {
   id?: number;
@@ -28,6 +40,7 @@ export default function Dashboard() {
   const [data, setData] = useState<Registro[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
+  const [selectedAnio, setSelectedAnio] = useState('TODOS');
   const [selectedProvincia, setSelectedProvincia] = useState('TODAS');
   const [selectedOrigen, setSelectedOrigen] = useState('TODOS');
   const [currentPage, setCurrentPage] = useState(1);
@@ -39,18 +52,42 @@ export default function Dashboard() {
 
   async function fetchData() {
     setLoading(true);
-    const { data: rows, error } = await supabase
-      .from('patentamientos_resumen')
-      .select('*')
-      .order('cantidad', { ascending: false });
+    // Traer todos los registros agregados
+    let allRows: Registro[] = [];
+    let from = 0;
+    const step = 1000;
+    let hasMore = true;
 
-    if (error) {
-      console.error('Error al consultar Supabase:', error.message);
-    } else if (rows) {
-      setData(rows);
+    while (hasMore) {
+      const { data: rows, error } = await supabase
+        .from('patentamientos_resumen')
+        .select('*')
+        .range(from, from + step - 1)
+        .order('anio', { ascending: false });
+
+      if (error) {
+        console.error('Error al consultar Supabase:', error.message);
+        break;
+      }
+
+      if (rows && rows.length > 0) {
+        allRows = allRows.concat(rows);
+        from += step;
+        if (rows.length < step) hasMore = false;
+      } else {
+        hasMore = false;
+      }
     }
+
+    setData(allRows);
     setLoading(false);
   }
+
+  // Opciones únicas para selectores
+  const aniosDisponibles = useMemo(() => {
+    const list = Array.from(new Set(data.map((d) => d.anio))).filter(Boolean);
+    return ['TODOS', ...list.sort((a, b) => b - a).map(String)];
+  }, [data]);
 
   const provinciasDisponibles = useMemo(() => {
     const list = Array.from(new Set(data.map((d) => d.provincia))).filter(Boolean);
@@ -62,7 +99,7 @@ export default function Dashboard() {
     return ['TODOS', ...list.sort()];
   }, [data]);
 
-  // Filtrado compuesto: buscador libre (marca o modelo) + selectores
+  // Filtrado reactivo integral
   const filteredData = useMemo(() => {
     const term = searchTerm.trim().toUpperCase();
     return data.filter((item) => {
@@ -71,14 +108,15 @@ export default function Dashboard() {
         item.marca.toUpperCase().includes(term) ||
         item.modelo.toUpperCase().includes(term);
 
+      const matchAnio = selectedAnio === 'TODOS' || item.anio === Number(selectedAnio);
       const matchProv = selectedProvincia === 'TODAS' || item.provincia === selectedProvincia;
       const matchOrigen = selectedOrigen === 'TODOS' || item.origen === selectedOrigen;
 
-      return matchSearch && matchProv && matchOrigen;
+      return matchSearch && matchAnio && matchProv && matchOrigen;
     });
-  }, [data, searchTerm, selectedProvincia, selectedOrigen]);
+  }, [data, searchTerm, selectedAnio, selectedProvincia, selectedOrigen]);
 
-  // Métricas calculadas sobre datos filtrados
+  // Métricas calculadas
   const totalPatentamientos = useMemo(() => {
     return filteredData.reduce((acc, curr) => acc + curr.cantidad, 0);
   }, [filteredData]);
@@ -104,8 +142,8 @@ export default function Dashboard() {
     return { nombre: sorted[0][0], total: sorted[0][1] };
   }, [filteredData]);
 
-  // Top 10 para gráfico
-  const chartData = useMemo(() => {
+  // Gráfico: Top 10 Marcas
+  const marcasChartData = useMemo(() => {
     const agrupado: Record<string, number> = {};
     filteredData.forEach((d) => {
       agrupado[d.marca] = (agrupado[d.marca] || 0) + d.cantidad;
@@ -114,6 +152,17 @@ export default function Dashboard() {
       .map(([marca, cantidad]) => ({ marca, cantidad }))
       .sort((a, b) => b.cantidad - a.cantidad)
       .slice(0, 10);
+  }, [filteredData]);
+
+  // Gráfico: Evolución por Año
+  const evolucionChartData = useMemo(() => {
+    const agrupado: Record<number, number> = {};
+    filteredData.forEach((d) => {
+      agrupado[d.anio] = (agrupado[d.anio] || 0) + d.cantidad;
+    });
+    return Object.entries(agrupado)
+      .map(([anio, cantidad]) => ({ anio: Number(anio), cantidad }))
+      .sort((a, b) => a.anio - b.anio);
   }, [filteredData]);
 
   // Paginación
@@ -136,7 +185,7 @@ export default function Dashboard() {
             <h1 className="text-3xl font-bold tracking-tight text-white">Patentitas</h1>
           </div>
           <p className="text-slate-400 text-sm mt-1">
-            Estadísticas y análisis de registros 0km en Argentina (DNRPA Datos Abiertos)
+            Serie histórica y registros 0km en Argentina (DNRPA Datos Abiertos)
           </p>
         </div>
         <button
@@ -149,7 +198,7 @@ export default function Dashboard() {
         </button>
       </header>
 
-      {/* Tarjetas KPI */}
+      {/* KPI Cards */}
       <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="flex items-center justify-between text-slate-400">
@@ -159,7 +208,7 @@ export default function Dashboard() {
           <p className="text-2xl font-bold text-white mt-2">
             {loading ? '...' : totalPatentamientos.toLocaleString('es-AR')}
           </p>
-          <span className="text-xs text-slate-500 mt-1 block">Unidades registradas en filtro</span>
+          <span className="text-xs text-slate-500 mt-1 block">Unidades en selección</span>
         </div>
 
         <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-xl">
@@ -171,7 +220,7 @@ export default function Dashboard() {
             {loading ? '...' : topMarca.nombre}
           </p>
           <span className="text-xs text-slate-500 mt-1 block">
-            {loading ? '...' : `${topMarca.total.toLocaleString('es-AR')} patentamientos`}
+            {loading ? '...' : `${topMarca.total.toLocaleString('es-AR')} unidades`}
           </span>
         </div>
 
@@ -190,19 +239,21 @@ export default function Dashboard() {
 
         <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-sm font-medium">Jurisdicciones</span>
+            <span className="text-sm font-medium">Cobertura</span>
             <MapPin className="w-5 h-5 text-purple-400" />
           </div>
           <p className="text-2xl font-bold text-white mt-2">
-            {loading ? '...' : provinciasDisponibles.length - 1}
+            {loading ? '...' : `${provinciasDisponibles.length - 1} Provincias`}
           </p>
-          <span className="text-xs text-slate-500 mt-1 block">Provincias representadas</span>
+          <span className="text-xs text-slate-500 mt-1 block">
+            {selectedAnio === 'TODOS' ? 'Período completo 2022-2026' : `Año ${selectedAnio}`}
+          </span>
         </div>
       </section>
 
-      {/* Controles de Búsqueda y Filtros */}
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-slate-900/40 p-4 border border-slate-800 rounded-xl">
-        <div className="md:col-span-1">
+      {/* Controles y Filtros */}
+      <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 bg-slate-900/40 p-4 border border-slate-800 rounded-xl">
+        <div>
           <label className="block text-xs font-semibold text-slate-400 mb-1">
             Buscar Marca o Modelo
           </label>
@@ -210,7 +261,7 @@ export default function Dashboard() {
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
             <input
               type="text"
-              placeholder="Ej: Toyota, Cronos, 208, Hilux..."
+              placeholder="Ej: Toyota, Hilux, Cronos..."
               value={searchTerm}
               onChange={(e) => {
                 setSearchTerm(e.target.value);
@@ -218,6 +269,27 @@ export default function Dashboard() {
               }}
               className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
             />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-slate-400 mb-1">Año</label>
+          <div className="relative">
+            <Calendar className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+            <select
+              value={selectedAnio}
+              onChange={(e) => {
+                setSelectedAnio(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+            >
+              {aniosDisponibles.map((a) => (
+                <option key={a} value={a}>
+                  {a === 'TODOS' ? 'Todos los años' : a}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
 
@@ -240,7 +312,7 @@ export default function Dashboard() {
         </div>
 
         <div>
-          <label className="block text-xs font-semibold text-slate-400 mb-1">Origen de Fabricación</label>
+          <label className="block text-xs font-semibold text-slate-400 mb-1">Origen</label>
           <select
             value={selectedOrigen}
             onChange={(e) => {
@@ -258,52 +330,87 @@ export default function Dashboard() {
         </div>
       </section>
 
-      {/* Gráfico */}
-      <section className="bg-slate-900/60 border border-slate-800 rounded-xl p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Top 10 Marcas según filtros</h2>
-        <div className="h-72 w-full">
-          {chartData.length > 0 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 20 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
-                <XAxis
-                  dataKey="marca"
-                  stroke="#94a3b8"
-                  fontSize={12}
-                  tickLine={false}
-                  interval={0}
-                  angle={-25}
-                  textAnchor="end"
-                />
-                <YAxis stroke="#94a3b8" fontSize={12} tickLine={false} />
-                <Tooltip
-                  contentStyle={{ backgroundColor: '#1e293b', borderColor: '#475569', borderRadius: '8px' }}
-                  itemStyle={{ color: '#60a5fa' }}
-                />
-                <Bar dataKey="cantidad" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="h-full flex items-center justify-center text-slate-500 text-sm">
-              Sin datos para mostrar con los criterios seleccionados.
-            </div>
-          )}
+      {/* Gráficos */}
+      <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Gráfico 1: Top 10 Marcas */}
+        <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-6">
+          <h2 className="text-lg font-semibold text-white mb-4">Top 10 Marcas</h2>
+          <div className="h-72 w-full">
+            {marcasChartData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={marcasChartData} margin={{ top: 10, right: 10, left: -10, bottom: 20 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
+                  <XAxis
+                    dataKey="marca"
+                    stroke="#94a3b8"
+                    fontSize={11}
+                    tickLine={false}
+                    interval={0}
+                    angle={-25}
+                    textAnchor="end"
+                  />
+                  <YAxis stroke="#94a3b8" fontSize={11} tickLine={false} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#1e293b', borderColor: '#475569', borderRadius: '8px' }}
+                    itemStyle={{ color: '#60a5fa' }}
+                  />
+                  <Bar dataKey="cantidad" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center text-slate-500 text-sm">
+                Sin datos disponibles.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Gráfico 2: Evolución Interanual */}
+        <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-6">
+          <h2 className="text-lg font-semibold text-white mb-4">Evolución Anual (Unidades)</h2>
+          <div className="h-72 w-full">
+            {evolucionChartData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={evolucionChartData} margin={{ top: 10, right: 20, left: -10, bottom: 20 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
+                  <XAxis dataKey="anio" stroke="#94a3b8" fontSize={12} tickLine={false} />
+                  <YAxis stroke="#94a3b8" fontSize={11} tickLine={false} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#1e293b', borderColor: '#475569', borderRadius: '8px' }}
+                    itemStyle={{ color: '#10b981' }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="cantidad"
+                    stroke="#10b981"
+                    strokeWidth={3}
+                    dot={{ fill: '#10b981', r: 5 }}
+                    activeDot={{ r: 7 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center text-slate-500 text-sm">
+                Sin datos disponibles.
+              </div>
+            )}
+          </div>
         </div>
       </section>
 
       {/* Tabla detallada */}
       <section className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
         <div className="p-4 border-b border-slate-800 flex justify-between items-center">
-          <h2 className="text-lg font-semibold text-white">Detalle de Patentamientos</h2>
+          <h2 className="text-lg font-semibold text-white">Detalle de Registros</h2>
           <span className="text-xs text-slate-400">
-            {filteredData.length} registros encontrados
+            {filteredData.length} combinaciones encontradas
           </span>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm text-slate-300">
             <thead className="bg-slate-950/60 text-xs uppercase text-slate-400 border-b border-slate-800">
               <tr>
-                <th className="px-4 py-3">Período</th>
+                <th className="px-4 py-3">Año / Mes</th>
                 <th className="px-4 py-3">Marca</th>
                 <th className="px-4 py-3">Modelo</th>
                 <th className="px-4 py-3">Origen</th>
@@ -315,7 +422,9 @@ export default function Dashboard() {
               {paginatedData.length > 0 ? (
                 paginatedData.map((row, idx) => (
                   <tr key={idx} className="hover:bg-slate-800/30 transition">
-                    <td className="px-4 py-3 text-slate-400">{row.mes}/{row.anio}</td>
+                    <td className="px-4 py-3 text-slate-400">
+                      {row.anio} - M{String(row.mes).padStart(2, '0')}
+                    </td>
                     <td className="px-4 py-3 font-medium text-white">{row.marca}</td>
                     <td className="px-4 py-3">{row.modelo}</td>
                     <td className="px-4 py-3 text-xs">
@@ -332,7 +441,7 @@ export default function Dashboard() {
               ) : (
                 <tr>
                   <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
-                    No se encontraron resultados para la búsqueda.
+                    No se encontraron registros para los filtros seleccionados.
                   </td>
                 </tr>
               )}
