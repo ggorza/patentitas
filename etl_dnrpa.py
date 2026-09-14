@@ -17,7 +17,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 CKAN_PACKAGE_URL = "https://datos.jus.gob.ar/api/3/action/package_show?id=inscripciones-iniciales-de-autos"
 
 # Rango histórico
-ANIO_DESDE = 2022
+ANIO_DESDE = 2018
 
 
 def obtener_todos_los_archivos():
