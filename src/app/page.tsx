@@ -49,7 +49,7 @@ export default function Dashboard() {
   const [tableData, setTableData] = useState<Registro[]>([]);
   const [totalFilas, setTotalFilas] = useState(0);
 
-  // Filtros activos
+  // Filtros
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedAnio, setSelectedAnio] = useState('TODOS');
   const [selectedProvincia, setSelectedProvincia] = useState('TODAS');
@@ -60,7 +60,7 @@ export default function Dashboard() {
   const [sortColumn, setSortColumn] = useState<SortColumn>('cantidad');
   const [sortAscending, setSortAscending] = useState(false);
 
-  // Listas de selección
+  // Opciones de selector
   const [aniosDisponibles, setAniosDisponibles] = useState<string[]>(['TODOS']);
   const [provinciasDisponibles, setProvinciasDisponibles] = useState<string[]>(['TODAS']);
 
@@ -70,88 +70,127 @@ export default function Dashboard() {
   const [barChartData, setBarChartData] = useState<{ marca: string; cantidad: number }[]>([]);
   const [lineChartData, setLineChartData] = useState<{ anio: number; cantidad: number }[]>([]);
 
-  // 1. Cargar opciones iniciales (años y provincias)
+  // 1. Cargar opciones iniciales (años y todas las provincias del país)
   useEffect(() => {
-    async function loadFiltrosIniciales() {
-      const { data: totales } = await supabase
-        .from('vista_totales_anuales')
-        .select('anio')
-        .order('anio', { ascending: false });
+    async function initOptions() {
+      const [aniosRes, provsRes] = await Promise.all([
+        supabase.from('vista_totales_anuales').select('anio').order('anio', { ascending: false }),
+        supabase.from('vista_provincias').select('provincia')
+      ]);
 
-      if (totales) {
-        setAniosDisponibles(['TODOS', ...totales.map((t: { anio: number }) => String(t.anio))]);
+      if (aniosRes.data) {
+        setAniosDisponibles(['TODOS', ...aniosRes.data.map((t: { anio: number }) => String(t.anio))]);
       }
 
-      const { data: provsData } = await supabase
-        .from('patentamientos_resumen')
-        .select('provincia')
-        .limit(1000);
-
-      if (provsData) {
-        const provs = Array.from(new Set(provsData.map((d: { provincia: string }) => d.provincia)))
-          .filter(Boolean)
-          .sort();
-        setProvinciasDisponibles(['TODAS', ...provs]);
+      if (provsRes.data) {
+        setProvinciasDisponibles(['TODAS', ...provsRes.data.map((p: { provincia: string }) => p.provincia)]);
       }
     }
-    loadFiltrosIniciales();
+    initOptions();
   }, []);
 
-  // 2. Carga agregada para KPIs y Gráficos
-  const loadMetricsAndCharts = useCallback(async () => {
+  // 2. Cargar KPIs y Gráficos sin topear los millones de unidades
+  const loadGlobalMetrics = useCallback(async () => {
     setLoading(true);
 
-    let query = supabase.from('patentamientos_resumen').select('anio, marca, cantidad');
+    // Si no hay filtro de provincia ni texto, leemos de las vistas consolidadas (ultrarrápido y 100% exacto)
+    if (selectedProvincia === 'TODAS' && searchTerm.trim() === '') {
+      const { data: totalesData } = await supabase
+        .from('vista_totales_anuales')
+        .select('*')
+        .order('anio', { ascending: true });
 
-    if (selectedAnio !== 'TODOS') query = query.eq('anio', Number(selectedAnio));
-    if (selectedProvincia !== 'TODAS') query = query.eq('provincia', selectedProvincia);
+      if (totalesData) {
+        setLineChartData(totalesData.map((t: { anio: number; total_unidades: number }) => ({
+          anio: t.anio,
+          cantidad: Number(t.total_unidades)
+        })));
 
-    const cleaned = searchTerm.trim();
-    if (cleaned.length > 0) {
-      query = query.or(`marca.ilike.%${cleaned}%,modelo.ilike.%${cleaned}%`);
-    }
-
-    const { data: rows, error } = await query.limit(25000);
-
-    if (!error && rows) {
-      let total = 0;
-      const porMarca: Record<string, number> = {};
-      const porAnio: Record<number, number> = {};
-
-      rows.forEach((r: { anio: number; marca: string; cantidad: number }) => {
-        const qty = Number(r.cantidad);
-        total += qty;
-        porMarca[r.marca] = (porMarca[r.marca] || 0) + qty;
-        porAnio[r.anio] = (porAnio[r.anio] || 0) + qty;
-      });
-
-      setTotalPatentamientos(total);
-
-      // Top 10 Marcas
-      const sortedMarcas = Object.entries(porMarca)
-        .map(([marca, cantidad]) => ({ marca, cantidad }))
-        .sort((a, b) => b.cantidad - a.cantidad);
-
-      if (sortedMarcas.length > 0) {
-        setTopMarca({ nombre: sortedMarcas[0].marca, total: sortedMarcas[0].cantidad });
-        setBarChartData(sortedMarcas.slice(0, 10));
-      } else {
-        setTopMarca({ nombre: '-', total: 0 });
-        setBarChartData([]);
+        if (selectedAnio === 'TODOS') {
+          const suma = totalesData.reduce((acc: number, curr: { total_unidades: number }) => acc + Number(curr.total_unidades), 0);
+          setTotalPatentamientos(suma);
+        } else {
+          const match = totalesData.find((t: { anio: number }) => String(t.anio) === selectedAnio);
+          setTotalPatentamientos(match ? Number(match.total_unidades) : 0);
+        }
       }
 
-      // Evolución Interanual
-      const sortedAnios = Object.entries(porAnio)
-        .map(([anio, cantidad]) => ({ anio: Number(anio), cantidad }))
-        .sort((a, b) => a.anio - b.anio);
+      let marcasQuery = supabase
+        .from('vista_top_marcas')
+        .select('marca, total_unidades')
+        .order('total_unidades', { ascending: false });
 
-      setLineChartData(sortedAnios);
+      if (selectedAnio !== 'TODOS') {
+        marcasQuery = marcasQuery.eq('anio', Number(selectedAnio));
+      }
+
+      const { data: marcasData } = await marcasQuery.limit(500);
+
+      if (marcasData && marcasData.length > 0) {
+        const agrupado: Record<string, number> = {};
+        marcasData.forEach((m: { marca: string; total_unidades: number }) => {
+          agrupado[m.marca] = (agrupado[m.marca] || 0) + Number(m.total_unidades);
+        });
+
+        const sorted = Object.entries(agrupado)
+          .map(([marca, cantidad]) => ({ marca, cantidad }))
+          .sort((a, b) => b.cantidad - a.cantidad);
+
+        setTopMarca({ nombre: sorted[0].marca, total: sorted[0].cantidad });
+        setBarChartData(sorted.slice(0, 10));
+      }
+    } else {
+      // Si hay filtros puntuales combinados (provincia o texto libre)
+      let query = supabase.from('patentamientos_resumen').select('anio, marca, cantidad');
+
+      if (selectedAnio !== 'TODOS') query = query.eq('anio', Number(selectedAnio));
+      if (selectedProvincia !== 'TODAS') query = query.eq('provincia', selectedProvincia);
+
+      const cleaned = searchTerm.trim();
+      if (cleaned.length > 0) {
+        query = query.or(`marca.ilike.%${cleaned}%,modelo.ilike.%${cleaned}%`);
+      }
+
+      const { data: rows } = await query.limit(5000);
+
+      if (rows && rows.length > 0) {
+        let total = 0;
+        const porMarca: Record<string, number> = {};
+        const porAnio: Record<number, number> = {};
+
+        rows.forEach((r: { anio: number; marca: string; cantidad: number }) => {
+          const qty = Number(r.cantidad);
+          total += qty;
+          porMarca[r.marca] = (porMarca[r.marca] || 0) + qty;
+          porAnio[r.anio] = (porAnio[r.anio] || 0) + qty;
+        });
+
+        setTotalPatentamientos(total);
+
+        const sortedMarcas = Object.entries(porMarca)
+          .map(([marca, cantidad]) => ({ marca, cantidad }))
+          .sort((a, b) => b.cantidad - a.cantidad);
+
+        setTopMarca({ nombre: sortedMarcas[0]?.marca || '-', total: sortedMarcas[0]?.cantidad || 0 });
+        setBarChartData(sortedMarcas.slice(0, 10));
+
+        const sortedAnios = Object.entries(porAnio)
+          .map(([anio, cantidad]) => ({ anio: Number(anio), cantidad }))
+          .sort((a, b) => a.anio - b.anio);
+
+        setLineChartData(sortedAnios);
+      } else {
+        setTotalPatentamientos(0);
+        setTopMarca({ nombre: '-', total: 0 });
+        setBarChartData([]);
+        setLineChartData([]);
+      }
     }
 
     setLoading(false);
   }, [selectedAnio, selectedProvincia, searchTerm]);
 
-  // 3. Carga paginada de la tabla
+  // 3. Cargar tabla paginada con ordenamiento
   const loadTableData = useCallback(async () => {
     setTableLoading(true);
     const from = (currentPage - 1) * pageSize;
@@ -191,12 +230,15 @@ export default function Dashboard() {
   }, [selectedAnio, selectedProvincia, searchTerm, currentPage, sortColumn, sortAscending]);
 
   useEffect(() => {
+    loadGlobalMetrics();
+  }, [loadGlobalMetrics]);
+
+  useEffect(() => {
     const handler = setTimeout(() => {
-      loadMetricsAndCharts();
       loadTableData();
     }, 250);
     return () => clearTimeout(handler);
-  }, [loadMetricsAndCharts, loadTableData]);
+  }, [loadTableData]);
 
   const handleSort = (column: SortColumn) => {
     if (sortColumn === column) {
@@ -238,7 +280,7 @@ export default function Dashboard() {
         </div>
         <button
           onClick={() => {
-            loadMetricsAndCharts();
+            loadGlobalMetrics();
             loadTableData();
           }}
           disabled={loading || tableLoading}
@@ -259,12 +301,12 @@ export default function Dashboard() {
           <p className="text-2xl font-bold text-white mt-2">
             {loading ? '...' : totalPatentamientos.toLocaleString('es-AR')}
           </p>
-          <span className="text-xs text-slate-500 mt-1 block">Unidades bajo filtro actual</span>
+          <span className="text-xs text-slate-500 mt-1 block">Unidades registradas</span>
         </div>
 
         <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-sm font-medium">Marca Líder</span>
+            <span className="text-sm font-medium">Marca Más Vendida</span>
             <Award className="w-5 h-5 text-emerald-400" />
           </div>
           <p className="text-xl font-bold text-white mt-2 truncate">
@@ -283,14 +325,14 @@ export default function Dashboard() {
           <p className="text-2xl font-bold text-white mt-2">
             {tableLoading ? '...' : totalFilas.toLocaleString('es-AR')}
           </p>
-          <span className="text-xs text-slate-500 mt-1 block">Lotes de registros encontrados</span>
+          <span className="text-xs text-slate-500 mt-1 block">Combinaciones encontradas</span>
         </div>
       </section>
 
-      {/* Filtros Simplificados */}
+      {/* Filtros: Texto, Año y Provincia */}
       <section className="bg-slate-900/40 p-4 border border-slate-800 rounded-xl">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="md:col-span-1">
+          <div>
             <label className="block text-xs font-semibold text-slate-400 mb-1">
               Buscar Marca o Modelo
             </label>
