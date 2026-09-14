@@ -79,25 +79,37 @@ def procesar_y_cargar(ruta_csv_local: str):
         df_muestra = con.execute(
             f"SELECT * FROM read_csv_auto('{ruta_csv_local}', sample_size=5000, ignore_errors=true) LIMIT 3"
         ).fetchdf()
-        columnas_reales = [str(c).lower() for c in df_muestra.columns]
-        print(f"Columnas detectadas en el CSV: {columnas_reales}")
+        columnas_disponibles = list(df_muestra.columns)
+        print(f"Columnas detectadas en el CSV: {columnas_disponibles}")
 
-        col_fecha = next((c for c in df_muestra.columns if 'fecha' in c.lower()), 'tramite_fecha')
-        col_marca = next((c for c in df_muestra.columns if 'marca' in c.lower()), 'automotor_marca_descripcion')
-        col_modelo = next((c for c in df_muestra.columns if 'modelo' in c.lower()), 'automotor_modelo_descripcion')
-        col_origen = next((c for c in df_muestra.columns if 'origen' in c.lower()), 'automotor_origen')
-        col_prov = next((c for c in df_muestra.columns if 'provincia' in c.lower()), 'titular_radicacion_provincia')
+        # Priorizar descripciones exactas para evitar tomar columnas de códigos numéricos
+        def buscar_columna(preferidas, fallback):
+            for pref in preferidas:
+                for col in columnas_disponibles:
+                    if col.lower() == pref.lower():
+                        return col
+            for col in columnas_disponibles:
+                if fallback.lower() in col.lower() and 'codigo' not in col.lower() and 'anio' not in col.lower():
+                    return col
+            return columnas_disponibles[0]
+
+        col_fecha = buscar_columna(['tramite_fecha', 'fecha_tramite'], 'fecha')
+        col_marca = buscar_columna(['automotor_marca_descripcion', 'marca_descripcion', 'marca'], 'marca')
+        col_modelo = buscar_columna(['automotor_modelo_descripcion', 'modelo_descripcion', 'modelo'], 'modelo')
+        col_origen = buscar_columna(['automotor_origen', 'origen'], 'origen')
+        col_prov = buscar_columna(['titular_radicacion_provincia', 'provincia'], 'provincia')
 
         print(f"Columnas mapeadas -> Fecha: {col_fecha}, Marca: {col_marca}, Modelo: {col_modelo}, Origen: {col_origen}, Prov: {col_prov}")
 
+        # Se aplica CAST(... AS VARCHAR) defensivo para evitar errores con tipos no-texto
         query = (
             "WITH raw_data AS ("
             "    SELECT "
             f"       TRY_CAST(\"{col_fecha}\" AS DATE) AS fecha_parsed,"
-            f"       UPPER(TRIM(\"{col_marca}\")) AS marca,"
-            f"       COALESCE(UPPER(TRIM(\"{col_modelo}\")), 'SIN ESPECIFICAR') AS modelo,"
-            f"       COALESCE(\"{col_origen}\", 'Sin Dato') AS origen,"
-            f"       COALESCE(UPPER(TRIM(\"{col_prov}\")), 'NO ESPECIFICADA') AS provincia "
+            f"       UPPER(TRIM(CAST(\"{col_marca}\" AS VARCHAR))) AS marca,"
+            f"       COALESCE(UPPER(TRIM(CAST(\"{col_modelo}\" AS VARCHAR))), 'SIN ESPECIFICAR') AS modelo,"
+            f"       COALESCE(CAST(\"{col_origen}\" AS VARCHAR), 'Sin Dato') AS origen,"
+            f"       COALESCE(UPPER(TRIM(CAST(\"{col_prov}\" AS VARCHAR))), 'NO ESPECIFICADA') AS provincia "
             f"   FROM read_csv_auto('{ruta_csv_local}', sample_size=5000, ignore_errors=true)"
             ") "
             "SELECT "
