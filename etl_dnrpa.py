@@ -93,12 +93,7 @@ def procesar_y_cargar(ruta_csv_local: str):
         query = (
             "WITH raw_data AS ("
             "    SELECT "
-            f"       COALESCE("
-            f"           TRY_CAST(\"{col_fecha}\" AS DATE),"
-            f"           TRY_STRPTIME(\"{col_fecha}\", '%Y-%m-%d'),"
-            f"           TRY_STRPTIME(\"{col_fecha}\", '%d/%m/%Y'),"
-            f"           TRY_STRPTIME(\"{col_fecha}\", '%Y%m%d')"
-            "       ) AS fecha_parsed,"
+            f"       TRY_CAST(\"{col_fecha}\" AS DATE) AS fecha_parsed,"
             f"       UPPER(TRIM(\"{col_marca}\")) AS marca,"
             f"       COALESCE(UPPER(TRIM(\"{col_modelo}\")), 'SIN ESPECIFICAR') AS modelo,"
             f"       COALESCE(\"{col_origen}\", 'Sin Dato') AS origen,"
@@ -106,13 +101,13 @@ def procesar_y_cargar(ruta_csv_local: str):
             f"   FROM read_csv_auto('{ruta_csv_local}', sample_size=5000, ignore_errors=true)"
             ") "
             "SELECT "
-            "    CAST(YEAR(fecha_parsed) AS INT) AS anio, "
-            "    CAST(MONTH(fecha_parsed) AS INT) AS mes, "
+            "    CAST(YEAR(fecha_parsed) AS INTEGER) AS anio, "
+            "    CAST(MONTH(fecha_parsed) AS INTEGER) AS mes, "
             "    marca, "
             "    modelo, "
             "    origen, "
             "    provincia, "
-            "    CAST(COUNT(*) AS INT) AS cantidad "
+            "    CAST(COUNT(*) AS INTEGER) AS cantidad "
             "FROM raw_data "
             "WHERE fecha_parsed IS NOT NULL "
             "  AND marca IS NOT NULL "
@@ -127,9 +122,13 @@ def procesar_y_cargar(ruta_csv_local: str):
         print(f"Procesamiento finalizado. Filas agrupadas a insertar: {total_filas}")
         
         if total_filas == 0:
-            print("AVISO: No se generaron registros. Verificá el formato de las fechas.")
+            print("AVISO: No se generaron registros. Verificá la fecha parseada.")
             return
 
+        df_resumen['anio'] = df_resumen['anio'].astype(int)
+        df_resumen['mes'] = df_resumen['mes'].astype(int)
+        df_resumen['cantidad'] = df_resumen['cantidad'].astype(int)
+        
         registros = df_resumen.to_dict(orient="records")
         tamano_batch = 1000
         for i in range(0, total_filas, tamano_batch):
