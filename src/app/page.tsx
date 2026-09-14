@@ -21,6 +21,7 @@ import {
   Search,
   Calendar,
   Database,
+  X,
 } from 'lucide-react';
 
 interface Registro {
@@ -52,11 +53,10 @@ export default function Dashboard() {
   const [chartData, setChartData] = useState<{ marca: string; cantidad: number }[]>([]);
   const [aniosDisponibles, setAniosDisponibles] = useState<string[]>(['TODOS']);
 
-  // Carga global de métricas sin riesgo de tope de filas
+  // Carga global de métricas (desde vistas)
   const loadGlobalMetrics = useCallback(async () => {
     setLoading(true);
 
-    // 1. Obtener lista de años y totales anuales directos
     const { data: totalesData } = await supabase
       .from('vista_totales_anuales')
       .select('*')
@@ -67,7 +67,10 @@ export default function Dashboard() {
       setAniosDisponibles(['TODOS', ...anios]);
 
       if (selectedAnio === 'TODOS') {
-        const sumaGlobal = totalesData.reduce((acc: number, curr: { total_unidades: number }) => acc + Number(curr.total_unidades), 0);
+        const sumaGlobal = totalesData.reduce(
+          (acc: number, curr: { total_unidades: number }) => acc + Number(curr.total_unidades),
+          0
+        );
         setTotalPatentamientos(sumaGlobal);
       } else {
         const filaAnio = totalesData.find((t: { anio: number }) => String(t.anio) === selectedAnio);
@@ -75,7 +78,6 @@ export default function Dashboard() {
       }
     }
 
-    // 2. Obtener Top marcas para el año o histórico
     let marcasQuery = supabase
       .from('vista_top_marcas')
       .select('marca, total_unidades')
@@ -88,7 +90,6 @@ export default function Dashboard() {
     const { data: marcasData } = await marcasQuery.limit(500);
 
     if (marcasData && marcasData.length > 0) {
-      // Agrupar si es 'TODOS'
       const agrupado: Record<string, number> = {};
       marcasData.forEach((m: { marca: string; total_unidades: number }) => {
         agrupado[m.marca] = (agrupado[m.marca] || 0) + Number(m.total_unidades);
@@ -107,7 +108,7 @@ export default function Dashboard() {
     setLoading(false);
   }, [selectedAnio]);
 
-  // Carga de la tabla paginada en servidor
+  // Carga de la tabla paginada con búsqueda robusta
   const loadTableData = useCallback(async () => {
     setTableLoading(true);
     const from = (currentPage - 1) * pageSize;
@@ -117,13 +118,16 @@ export default function Dashboard() {
       .from('patentamientos_resumen')
       .select('*', { count: 'exact' });
 
+    // Filtro por año
     if (selectedAnio !== 'TODOS') {
       query = query.eq('anio', Number(selectedAnio));
     }
 
-    if (searchTerm.trim() !== '') {
-      const term = `%${searchTerm.trim().toUpperCase()}%`;
-      query = query.or(`marca.ilike.${term},modelo.ilike.${term}`);
+    // Filtro por texto: sintaxis estricta PostgREST con wildcard '*'
+    const cleanedSearch = searchTerm.trim();
+    if (cleanedSearch.length > 0) {
+      const pattern = `*${cleanedSearch}*`;
+      query = query.or(`marca.ilike.${pattern},modelo.ilike.${pattern}`);
     }
 
     query = query.order('cantidad', { ascending: false }).range(from, to);
@@ -133,6 +137,9 @@ export default function Dashboard() {
     if (!error && rows) {
       setTableData(rows);
       setTotalFilas(count || 0);
+    } else {
+      setTableData([]);
+      setTotalFilas(0);
     }
     setTableLoading(false);
   }, [selectedAnio, searchTerm, currentPage]);
@@ -141,8 +148,12 @@ export default function Dashboard() {
     loadGlobalMetrics();
   }, [loadGlobalMetrics]);
 
+  // Debounce simple para no saturar al tipear
   useEffect(() => {
-    loadTableData();
+    const handler = setTimeout(() => {
+      loadTableData();
+    }, 250);
+    return () => clearTimeout(handler);
   }, [loadTableData]);
 
   const totalPages = Math.ceil(totalFilas / pageSize) || 1;
@@ -205,17 +216,17 @@ export default function Dashboard() {
 
         <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-sm font-medium">Registros en Tabla</span>
+            <span className="text-sm font-medium">Coincidencias en Búsqueda</span>
             <Database className="w-5 h-5 text-purple-400" />
           </div>
           <p className="text-2xl font-bold text-white mt-2">
             {tableLoading ? '...' : totalFilas.toLocaleString('es-AR')}
           </p>
-          <span className="text-xs text-slate-500 mt-1 block">Lotes agregados coincidentes</span>
+          <span className="text-xs text-slate-500 mt-1 block">Combinaciones encontradas</span>
         </div>
       </section>
 
-      {/* Controles de Búsqueda y Filtros */}
+      {/* Buscador y Selector */}
       <section className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-slate-900/40 p-4 border border-slate-800 rounded-xl">
         <div className="sm:col-span-2">
           <label className="block text-xs font-semibold text-slate-400 mb-1">
@@ -225,14 +236,25 @@ export default function Dashboard() {
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
             <input
               type="text"
-              placeholder="Ej: Toyota, Cronos, 208, Hilux..."
+              placeholder="Ej: Hilux, Cronos, 208, Corolla, Amarok..."
               value={searchTerm}
               onChange={(e) => {
                 setSearchTerm(e.target.value);
-                setCurrentPage(1);
+                setCurrentPage(1); // Resetea siempre a la página 1 al cambiar el texto
               }}
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
+              className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-9 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
             />
+            {searchTerm && (
+              <button
+                onClick={() => {
+                  setSearchTerm('');
+                  setCurrentPage(1);
+                }}
+                className="absolute right-3 top-2.5 text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -244,7 +266,7 @@ export default function Dashboard() {
               value={selectedAnio}
               onChange={(e) => {
                 setSelectedAnio(e.target.value);
-                setCurrentPage(1);
+                setCurrentPage(1); // Resetea a página 1 al cambiar el año
               }}
               className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
             >
@@ -309,7 +331,7 @@ export default function Dashboard() {
               {tableLoading ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
-                    Cargando página...
+                    Buscando en la base de datos...
                   </td>
                 </tr>
               ) : tableData.length > 0 ? (
@@ -332,7 +354,7 @@ export default function Dashboard() {
               ) : (
                 <tr>
                   <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
-                    No se encontraron registros.
+                    No se encontraron registros para &quot;{searchTerm}&quot;.
                   </td>
                 </tr>
               )}
@@ -342,7 +364,7 @@ export default function Dashboard() {
 
         {/* Paginador */}
         <div className="p-4 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
-          <span>{totalFilas.toLocaleString('es-AR')} filas registradas</span>
+          <span>{totalFilas.toLocaleString('es-AR')} combinaciones encontradas</span>
           <div className="flex gap-2">
             <button
               onClick={() => setCurrentPage((p) => Math.max(p - 1, 1))}
