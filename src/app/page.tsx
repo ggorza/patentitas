@@ -54,7 +54,7 @@ export default function Dashboard() {
   // Cargar métricas globales y gráfico (desde la vista liviana)
   const loadGlobalMetrics = useCallback(async () => {
     setLoading(true);
-    let query = supabase.from('vista_metricas_anuales').select('anio, marca, total_unidades');
+    let query = supabase.from('vista_metricas_anuales').select('anio, marca, total_unidades').limit(10000);
 
     if (selectedAnio !== 'TODOS') {
       query = query.eq('anio', Number(selectedAnio));
