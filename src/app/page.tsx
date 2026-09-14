@@ -11,7 +11,7 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from 'recharts';
-import { Car, Award, MapPin, Layers, RefreshCw, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Car, Award, MapPin, Layers, RefreshCw, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 
 interface Registro {
   id?: number;
@@ -27,10 +27,11 @@ interface Registro {
 export default function Dashboard() {
   const [data, setData] = useState<Registro[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedMarca, setSelectedMarca] = useState('TODAS');
+  const [searchTerm, setSearchTerm] = useState('');
   const [selectedProvincia, setSelectedProvincia] = useState('TODAS');
+  const [selectedOrigen, setSelectedOrigen] = useState('TODOS');
   const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 10;
+  const itemsPerPage = 12;
 
   useEffect(() => {
     fetchData();
@@ -38,7 +39,6 @@ export default function Dashboard() {
 
   async function fetchData() {
     setLoading(true);
-    // Traemos los registros agregados desde Supabase
     const { data: rows, error } = await supabase
       .from('patentamientos_resumen')
       .select('*')
@@ -52,27 +52,33 @@ export default function Dashboard() {
     setLoading(false);
   }
 
-  // Opciones únicas para selectores
-  const marcasDisponibles = useMemo(() => {
-    const list = Array.from(new Set(data.map((d) => d.marca))).filter(Boolean);
-    return ['TODAS', ...list.sort()];
-  }, [data]);
-
   const provinciasDisponibles = useMemo(() => {
     const list = Array.from(new Set(data.map((d) => d.provincia))).filter(Boolean);
     return ['TODAS', ...list.sort()];
   }, [data]);
 
-  // Filtrado reactivo
-  const filteredData = useMemo(() => {
-    return data.filter((item) => {
-      const matchMarca = selectedMarca === 'TODAS' || item.marca === selectedMarca;
-      const matchProv = selectedProvincia === 'TODAS' || item.provincia === selectedProvincia;
-      return matchMarca && matchProv;
-    });
-  }, [data, selectedMarca, selectedProvincia]);
+  const origenesDisponibles = useMemo(() => {
+    const list = Array.from(new Set(data.map((d) => d.origen))).filter(Boolean);
+    return ['TODOS', ...list.sort()];
+  }, [data]);
 
-  // Métricas calculadas
+  // Filtrado compuesto: buscador libre (marca o modelo) + selectores
+  const filteredData = useMemo(() => {
+    const term = searchTerm.trim().toUpperCase();
+    return data.filter((item) => {
+      const matchSearch =
+        term === '' ||
+        item.marca.toUpperCase().includes(term) ||
+        item.modelo.toUpperCase().includes(term);
+
+      const matchProv = selectedProvincia === 'TODAS' || item.provincia === selectedProvincia;
+      const matchOrigen = selectedOrigen === 'TODOS' || item.origen === selectedOrigen;
+
+      return matchSearch && matchProv && matchOrigen;
+    });
+  }, [data, searchTerm, selectedProvincia, selectedOrigen]);
+
+  // Métricas calculadas sobre datos filtrados
   const totalPatentamientos = useMemo(() => {
     return filteredData.reduce((acc, curr) => acc + curr.cantidad, 0);
   }, [filteredData]);
@@ -98,7 +104,7 @@ export default function Dashboard() {
     return { nombre: sorted[0][0], total: sorted[0][1] };
   }, [filteredData]);
 
-  // Datos para gráfico Top 10 Marcas
+  // Top 10 para gráfico
   const chartData = useMemo(() => {
     const agrupado: Record<string, number> = {};
     filteredData.forEach((d) => {
@@ -110,7 +116,7 @@ export default function Dashboard() {
       .slice(0, 10);
   }, [filteredData]);
 
-  // Paginación de tabla
+  // Paginación
   const paginatedData = useMemo(() => {
     const start = (currentPage - 1) * itemsPerPage;
     return filteredData.slice(start, start + itemsPerPage);
@@ -130,7 +136,7 @@ export default function Dashboard() {
             <h1 className="text-3xl font-bold tracking-tight text-white">Patentitas</h1>
           </div>
           <p className="text-slate-400 text-sm mt-1">
-            Métricas de patentamientos 0km en Argentina (DNRPA Datos Abiertos)
+            Estadísticas y análisis de registros 0km en Argentina (DNRPA Datos Abiertos)
           </p>
         </div>
         <button
@@ -143,7 +149,7 @@ export default function Dashboard() {
         </button>
       </header>
 
-      {/* KPI Cards */}
+      {/* Tarjetas KPI */}
       <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="flex items-center justify-between text-slate-400">
@@ -153,7 +159,7 @@ export default function Dashboard() {
           <p className="text-2xl font-bold text-white mt-2">
             {loading ? '...' : totalPatentamientos.toLocaleString('es-AR')}
           </p>
-          <span className="text-xs text-slate-500 mt-1 block">Unidades registradas</span>
+          <span className="text-xs text-slate-500 mt-1 block">Unidades registradas en filtro</span>
         </div>
 
         <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-xl">
@@ -171,7 +177,7 @@ export default function Dashboard() {
 
         <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-sm font-medium">Modelo Líder</span>
+            <span className="text-sm font-medium">Modelo Más Registrado</span>
             <Car className="w-5 h-5 text-amber-400" />
           </div>
           <p className="text-xl font-bold text-white mt-2 truncate">
@@ -190,32 +196,33 @@ export default function Dashboard() {
           <p className="text-2xl font-bold text-white mt-2">
             {loading ? '...' : provinciasDisponibles.length - 1}
           </p>
-          <span className="text-xs text-slate-500 mt-1 block">Provincias con actividad</span>
+          <span className="text-xs text-slate-500 mt-1 block">Provincias representadas</span>
         </div>
       </section>
 
-      {/* Filtros */}
-      <section className="flex flex-col sm:flex-row gap-4 bg-slate-900/40 p-4 border border-slate-800/80 rounded-xl">
-        <div className="flex-1">
-          <label className="block text-xs font-semibold text-slate-400 mb-1">Filtrar por Marca</label>
-          <select
-            value={selectedMarca}
-            onChange={(e) => {
-              setSelectedMarca(e.target.value);
-              setCurrentPage(1);
-            }}
-            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
-          >
-            {marcasDisponibles.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
+      {/* Controles de Búsqueda y Filtros */}
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-slate-900/40 p-4 border border-slate-800 rounded-xl">
+        <div className="md:col-span-1">
+          <label className="block text-xs font-semibold text-slate-400 mb-1">
+            Buscar Marca o Modelo
+          </label>
+          <div className="relative">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+            <input
+              type="text"
+              placeholder="Ej: Toyota, Cronos, 208, Hilux..."
+              value={searchTerm}
+              onChange={(e) => {
+                setSearchTerm(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
+            />
+          </div>
         </div>
 
-        <div className="flex-1">
-          <label className="block text-xs font-semibold text-slate-400 mb-1">Filtrar por Provincia</label>
+        <div>
+          <label className="block text-xs font-semibold text-slate-400 mb-1">Provincia</label>
           <select
             value={selectedProvincia}
             onChange={(e) => {
@@ -231,11 +238,29 @@ export default function Dashboard() {
             ))}
           </select>
         </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-slate-400 mb-1">Origen de Fabricación</label>
+          <select
+            value={selectedOrigen}
+            onChange={(e) => {
+              setSelectedOrigen(e.target.value);
+              setCurrentPage(1);
+            }}
+            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+          >
+            {origenesDisponibles.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        </div>
       </section>
 
-      {/* Gráfico de barras */}
+      {/* Gráfico */}
       <section className="bg-slate-900/60 border border-slate-800 rounded-xl p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Top 10 Marcas en el período</h2>
+        <h2 className="text-lg font-semibold text-white mb-4">Top 10 Marcas según filtros</h2>
         <div className="h-72 w-full">
           {chartData.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
@@ -260,18 +285,18 @@ export default function Dashboard() {
             </ResponsiveContainer>
           ) : (
             <div className="h-full flex items-center justify-center text-slate-500 text-sm">
-              Sin datos para mostrar con los filtros aplicados.
+              Sin datos para mostrar con los criterios seleccionados.
             </div>
           )}
         </div>
       </section>
 
-      {/* Tabla de registros */}
+      {/* Tabla detallada */}
       <section className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
         <div className="p-4 border-b border-slate-800 flex justify-between items-center">
-          <h2 className="text-lg font-semibold text-white">Detalle de Patentamientos Agrupados</h2>
+          <h2 className="text-lg font-semibold text-white">Detalle de Patentamientos</h2>
           <span className="text-xs text-slate-400">
-            Mostrando {paginatedData.length} de {filteredData.length} combinaciones
+            {filteredData.length} registros encontrados
           </span>
         </div>
         <div className="overflow-x-auto">
@@ -307,7 +332,7 @@ export default function Dashboard() {
               ) : (
                 <tr>
                   <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
-                    No se encontraron registros.
+                    No se encontraron resultados para la búsqueda.
                   </td>
                 </tr>
               )}
