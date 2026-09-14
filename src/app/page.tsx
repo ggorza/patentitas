@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import {
   BarChart,
@@ -51,14 +51,14 @@ export default function Dashboard() {
   const [tableData, setTableData] = useState<RegistroAgrupado[]>([]);
   const [totalFilas, setTotalFilas] = useState(0);
 
-  // Filtros
+  // Filtros principales
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedAnio, setSelectedAnio] = useState('TODOS');
   const [selectedProvincia, setSelectedProvincia] = useState('TODAS');
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 12;
 
-  // Agrupaciones activas (vacío = sin agrupar, muestra detalle plano)
+  // Agrupaciones activas
   const [activeGroups, setActiveGroups] = useState<DimensionKey[]>([]);
 
   // Ordenamiento
@@ -74,6 +74,9 @@ export default function Dashboard() {
   const [topMarca, setTopMarca] = useState({ nombre: '-', total: 0 });
   const [barChartData, setBarChartData] = useState<{ marca: string; cantidad: number }[]>([]);
   const [lineChartData, setLineChartData] = useState<{ anio: number; cantidad: number }[]>([]);
+
+  // Referencia para evitar race conditions en la tabla
+  const reqIdRef = useRef(0);
 
   // 1. Cargar opciones iniciales
   useEffect(() => {
@@ -94,7 +97,7 @@ export default function Dashboard() {
     initOptions();
   }, []);
 
-  // 2. Cargar KPIs y Gráficos mediante RPC
+  // 2. Cargar KPIs y Gráficos
   const loadMetricsAndCharts = useCallback(async () => {
     setLoading(true);
 
@@ -143,9 +146,11 @@ export default function Dashboard() {
     setLoading(false);
   }, [selectedAnio, selectedProvincia, searchTerm]);
 
-  // 3. Cargar tabla con agrupación y orden dinámico en PostgreSQL
+  // 3. Cargar tabla (aislada con token para descartar peticiones desfasadas)
   const loadTableData = useCallback(async () => {
+    const currentReqId = ++reqIdRef.current;
     setTableLoading(true);
+
     const offset = (currentPage - 1) * pageSize;
 
     const { data: rows, error } = await supabase.rpc('agrupar_patentamientos', {
@@ -159,6 +164,9 @@ export default function Dashboard() {
       p_limit: pageSize,
     });
 
+    // Si llegó una petición posterior mientras esta resolvía, descartamos la vieja
+    if (currentReqId !== reqIdRef.current) return;
+
     if (!error && rows) {
       setTableData(rows);
       setTotalFilas(rows.length > 0 ? Number(rows[0].total_grupos) : 0);
@@ -170,26 +178,30 @@ export default function Dashboard() {
     setTableLoading(false);
   }, [activeGroups, selectedAnio, selectedProvincia, searchTerm, currentPage, sortColumn, sortAscending]);
 
+  // Disparar métricas al cambiar filtros superiores
   useEffect(() => {
-    const handler = setTimeout(() => {
+    const timer = setTimeout(() => {
       loadMetricsAndCharts();
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [loadMetricsAndCharts]);
+
+  // Disparar tabla ante cualquier cambio de estado
+  useEffect(() => {
+    const timer = setTimeout(() => {
       loadTableData();
-    }, 250);
-    return () => clearTimeout(handler);
-  }, [loadMetricsAndCharts, loadTableData]);
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [loadTableData]);
 
   // Manejador de checkboxes de agrupación
   const toggleGroup = (dimension: DimensionKey) => {
     setActiveGroups((prev) => {
       const exists = prev.includes(dimension);
-      const next = exists ? prev.filter((d) => d !== dimension) : [...prev, dimension];
-      return next;
+      return exists ? prev.filter((d) => d !== dimension) : [...prev, dimension];
     });
-    // Si ordenaba por una columna que se desactivó, fallback a cantidad
-    if (sortColumn === dimension && activeGroups.includes(dimension)) {
-      setSortColumn('cantidad');
-      setSortAscending(false);
-    }
+    setSortColumn('cantidad');
+    setSortAscending(false);
     setCurrentPage(1);
   };
 
@@ -214,7 +226,6 @@ export default function Dashboard() {
     );
   };
 
-  // Determinar visibilidad de columnas según checkboxes
   const isColVisible = (dim: DimensionKey) => {
     return activeGroups.length === 0 || activeGroups.includes(dim);
   };
@@ -550,7 +561,7 @@ export default function Dashboard() {
               {tableLoading ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
-                    Procesando agregación en base de datos...
+                    Cargando datos...
                   </td>
                 </tr>
               ) : tableData.length > 0 ? (
