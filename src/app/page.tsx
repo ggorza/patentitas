@@ -70,12 +70,12 @@ export default function Dashboard() {
   const [barChartData, setBarChartData] = useState<{ marca: string; cantidad: number }[]>([]);
   const [lineChartData, setLineChartData] = useState<{ anio: number; cantidad: number }[]>([]);
 
-  // 1. Cargar opciones iniciales (años y todas las provincias del país)
+  // 1. Cargar opciones iniciales (años y provincias)
   useEffect(() => {
     async function initOptions() {
       const [aniosRes, provsRes] = await Promise.all([
         supabase.from('vista_totales_anuales').select('anio').order('anio', { ascending: false }),
-        supabase.from('vista_provincias').select('provincia')
+        supabase.from('vista_provincias').select('provincia'),
       ]);
 
       if (aniosRes.data) {
@@ -89,102 +89,52 @@ export default function Dashboard() {
     initOptions();
   }, []);
 
-  // 2. Cargar KPIs y Gráficos sin topear los millones de unidades
-  const loadGlobalMetrics = useCallback(async () => {
+  // 2. Cargar KPIs y Gráficos mediante función RPC de Supabase (sin recortes)
+  const loadMetricsAndCharts = useCallback(async () => {
     setLoading(true);
 
-    // Si no hay filtro de provincia ni texto, leemos de las vistas consolidadas (ultrarrápido y 100% exacto)
-    if (selectedProvincia === 'TODAS' && searchTerm.trim() === '') {
-      const { data: totalesData } = await supabase
-        .from('vista_totales_anuales')
-        .select('*')
-        .order('anio', { ascending: true });
+    const { data: rows, error } = await supabase.rpc('obtener_metricas_filtradas', {
+      p_anio: selectedAnio === 'TODOS' ? null : Number(selectedAnio),
+      p_provincia: selectedProvincia === 'TODAS' ? null : selectedProvincia,
+      p_search: searchTerm.trim() === '' ? null : searchTerm.trim(),
+    });
 
-      if (totalesData) {
-        setLineChartData(totalesData.map((t: { anio: number; total_unidades: number }) => ({
-          anio: t.anio,
-          cantidad: Number(t.total_unidades)
-        })));
+    if (!error && rows && rows.length > 0) {
+      let total = 0;
+      const porMarca: Record<string, number> = {};
+      const porAnio: Record<number, number> = {};
 
-        if (selectedAnio === 'TODOS') {
-          const suma = totalesData.reduce((acc: number, curr: { total_unidades: number }) => acc + Number(curr.total_unidades), 0);
-          setTotalPatentamientos(suma);
-        } else {
-          const match = totalesData.find((t: { anio: number }) => String(t.anio) === selectedAnio);
-          setTotalPatentamientos(match ? Number(match.total_unidades) : 0);
-        }
-      }
+      rows.forEach((r: { anio: number; marca: string; total_unidades: number }) => {
+        const qty = Number(r.total_unidades);
+        total += qty;
+        porMarca[r.marca] = (porMarca[r.marca] || 0) + qty;
+        porAnio[r.anio] = (porAnio[r.anio] || 0) + qty;
+      });
 
-      let marcasQuery = supabase
-        .from('vista_top_marcas')
-        .select('marca, total_unidades')
-        .order('total_unidades', { ascending: false });
+      setTotalPatentamientos(total);
 
-      if (selectedAnio !== 'TODOS') {
-        marcasQuery = marcasQuery.eq('anio', Number(selectedAnio));
-      }
+      // Top Marcas
+      const sortedMarcas = Object.entries(porMarca)
+        .map(([marca, cantidad]) => ({ marca, cantidad }))
+        .sort((a, b) => b.cantidad - a.cantidad);
 
-      const { data: marcasData } = await marcasQuery.limit(500);
+      setTopMarca({
+        nombre: sortedMarcas[0]?.marca || '-',
+        total: sortedMarcas[0]?.cantidad || 0,
+      });
+      setBarChartData(sortedMarcas.slice(0, 10));
 
-      if (marcasData && marcasData.length > 0) {
-        const agrupado: Record<string, number> = {};
-        marcasData.forEach((m: { marca: string; total_unidades: number }) => {
-          agrupado[m.marca] = (agrupado[m.marca] || 0) + Number(m.total_unidades);
-        });
+      // Evolución interanual completa
+      const sortedAnios = Object.entries(porAnio)
+        .map(([anio, cantidad]) => ({ anio: Number(anio), cantidad }))
+        .sort((a, b) => a.anio - b.anio);
 
-        const sorted = Object.entries(agrupado)
-          .map(([marca, cantidad]) => ({ marca, cantidad }))
-          .sort((a, b) => b.cantidad - a.cantidad);
-
-        setTopMarca({ nombre: sorted[0].marca, total: sorted[0].cantidad });
-        setBarChartData(sorted.slice(0, 10));
-      }
+      setLineChartData(sortedAnios);
     } else {
-      // Si hay filtros puntuales combinados (provincia o texto libre)
-      let query = supabase.from('patentamientos_resumen').select('anio, marca, cantidad');
-
-      if (selectedAnio !== 'TODOS') query = query.eq('anio', Number(selectedAnio));
-      if (selectedProvincia !== 'TODAS') query = query.eq('provincia', selectedProvincia);
-
-      const cleaned = searchTerm.trim();
-      if (cleaned.length > 0) {
-        query = query.or(`marca.ilike.%${cleaned}%,modelo.ilike.%${cleaned}%`);
-      }
-
-      const { data: rows } = await query.limit(5000);
-
-      if (rows && rows.length > 0) {
-        let total = 0;
-        const porMarca: Record<string, number> = {};
-        const porAnio: Record<number, number> = {};
-
-        rows.forEach((r: { anio: number; marca: string; cantidad: number }) => {
-          const qty = Number(r.cantidad);
-          total += qty;
-          porMarca[r.marca] = (porMarca[r.marca] || 0) + qty;
-          porAnio[r.anio] = (porAnio[r.anio] || 0) + qty;
-        });
-
-        setTotalPatentamientos(total);
-
-        const sortedMarcas = Object.entries(porMarca)
-          .map(([marca, cantidad]) => ({ marca, cantidad }))
-          .sort((a, b) => b.cantidad - a.cantidad);
-
-        setTopMarca({ nombre: sortedMarcas[0]?.marca || '-', total: sortedMarcas[0]?.cantidad || 0 });
-        setBarChartData(sortedMarcas.slice(0, 10));
-
-        const sortedAnios = Object.entries(porAnio)
-          .map(([anio, cantidad]) => ({ anio: Number(anio), cantidad }))
-          .sort((a, b) => a.anio - b.anio);
-
-        setLineChartData(sortedAnios);
-      } else {
-        setTotalPatentamientos(0);
-        setTopMarca({ nombre: '-', total: 0 });
-        setBarChartData([]);
-        setLineChartData([]);
-      }
+      setTotalPatentamientos(0);
+      setTopMarca({ nombre: '-', total: 0 });
+      setBarChartData([]);
+      setLineChartData([]);
     }
 
     setLoading(false);
@@ -230,15 +180,12 @@ export default function Dashboard() {
   }, [selectedAnio, selectedProvincia, searchTerm, currentPage, sortColumn, sortAscending]);
 
   useEffect(() => {
-    loadGlobalMetrics();
-  }, [loadGlobalMetrics]);
-
-  useEffect(() => {
     const handler = setTimeout(() => {
+      loadMetricsAndCharts();
       loadTableData();
     }, 250);
     return () => clearTimeout(handler);
-  }, [loadTableData]);
+  }, [loadMetricsAndCharts, loadTableData]);
 
   const handleSort = (column: SortColumn) => {
     if (sortColumn === column) {
@@ -280,7 +227,7 @@ export default function Dashboard() {
         </div>
         <button
           onClick={() => {
-            loadGlobalMetrics();
+            loadMetricsAndCharts();
             loadTableData();
           }}
           disabled={loading || tableLoading}
@@ -301,12 +248,12 @@ export default function Dashboard() {
           <p className="text-2xl font-bold text-white mt-2">
             {loading ? '...' : totalPatentamientos.toLocaleString('es-AR')}
           </p>
-          <span className="text-xs text-slate-500 mt-1 block">Unidades registradas</span>
+          <span className="text-xs text-slate-500 mt-1 block">Unidades reales bajo filtro actual</span>
         </div>
 
         <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-sm font-medium">Marca Más Vendida</span>
+            <span className="text-sm font-medium">Marca Líder</span>
             <Award className="w-5 h-5 text-emerald-400" />
           </div>
           <p className="text-xl font-bold text-white mt-2 truncate">
@@ -325,7 +272,7 @@ export default function Dashboard() {
           <p className="text-2xl font-bold text-white mt-2">
             {tableLoading ? '...' : totalFilas.toLocaleString('es-AR')}
           </p>
-          <span className="text-xs text-slate-500 mt-1 block">Combinaciones encontradas</span>
+          <span className="text-xs text-slate-500 mt-1 block">Lotes de registros encontrados</span>
         </div>
       </section>
 
@@ -340,7 +287,7 @@ export default function Dashboard() {
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <input
                 type="text"
-                placeholder="Ej: Hilux, Cronos, 208, Amarok..."
+                placeholder="Ej: Hilux, Cronos, Renegade, 208..."
                 value={searchTerm}
                 onChange={(e) => {
                   setSearchTerm(e.target.value);
@@ -376,7 +323,7 @@ export default function Dashboard() {
               >
                 {aniosDisponibles.map((a) => (
                   <option key={a} value={a}>
-                    {a === 'TODOS' ? 'Todos los años' : a}
+                    {a === 'TODOS' ? 'Todos los años (2018–2026)' : a}
                   </option>
                 ))}
               </select>
