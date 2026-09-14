@@ -20,6 +20,7 @@ import {
   ChevronRight,
   Search,
   Calendar,
+  Database,
 } from 'lucide-react';
 
 interface Registro {
@@ -37,7 +38,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [tableLoading, setTableLoading] = useState(false);
   const [tableData, setTableData] = useState<Registro[]>([]);
-  const [totalCount, setTotalCount] = useState(0);
+  const [totalFilas, setTotalFilas] = useState(0);
 
   // Filtros
   const [searchTerm, setSearchTerm] = useState('');
@@ -45,54 +46,68 @@ export default function Dashboard() {
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 12;
 
-  // Métricas agregadas
+  // Métricas
   const [totalPatentamientos, setTotalPatentamientos] = useState(0);
   const [topMarca, setTopMarca] = useState({ nombre: '-', total: 0 });
   const [chartData, setChartData] = useState<{ marca: string; cantidad: number }[]>([]);
   const [aniosDisponibles, setAniosDisponibles] = useState<string[]>(['TODOS']);
 
-  // Cargar métricas globales y gráfico (desde la vista liviana)
+  // Carga global de métricas sin riesgo de tope de filas
   const loadGlobalMetrics = useCallback(async () => {
     setLoading(true);
-    let query = supabase.from('vista_metricas_anuales').select('anio, marca, total_unidades').limit(10000);
 
-    if (selectedAnio !== 'TODOS') {
-      query = query.eq('anio', Number(selectedAnio));
+    // 1. Obtener lista de años y totales anuales directos
+    const { data: totalesData } = await supabase
+      .from('vista_totales_anuales')
+      .select('*')
+      .order('anio', { ascending: false });
+
+    if (totalesData && totalesData.length > 0) {
+      const anios = totalesData.map((t: { anio: number }) => String(t.anio));
+      setAniosDisponibles(['TODOS', ...anios]);
+
+      if (selectedAnio === 'TODOS') {
+        const sumaGlobal = totalesData.reduce((acc: number, curr: { total_unidades: number }) => acc + Number(curr.total_unidades), 0);
+        setTotalPatentamientos(sumaGlobal);
+      } else {
+        const filaAnio = totalesData.find((t: { anio: number }) => String(t.anio) === selectedAnio);
+        setTotalPatentamientos(filaAnio ? Number(filaAnio.total_unidades) : 0);
+      }
     }
 
-    const { data: rows, error } = await query;
+    // 2. Obtener Top marcas para el año o histórico
+    let marcasQuery = supabase
+      .from('vista_top_marcas')
+      .select('marca, total_unidades')
+      .order('total_unidades', { ascending: false });
 
-    if (!error && rows) {
-      let total = 0;
-      const porMarca: Record<string, number> = {};
-      const aniosSet = new Set<number>();
+    if (selectedAnio !== 'TODOS') {
+      marcasQuery = marcasQuery.eq('anio', Number(selectedAnio));
+    }
 
-      rows.forEach((r: { anio: number; marca: string; total_unidades: number }) => {
-        total += r.total_unidades;
-        aniosSet.add(r.anio);
-        porMarca[r.marca] = (porMarca[r.marca] || 0) + r.total_unidades;
+    const { data: marcasData } = await marcasQuery.limit(500);
+
+    if (marcasData && marcasData.length > 0) {
+      // Agrupar si es 'TODOS'
+      const agrupado: Record<string, number> = {};
+      marcasData.forEach((m: { marca: string; total_unidades: number }) => {
+        agrupado[m.marca] = (agrupado[m.marca] || 0) + Number(m.total_unidades);
       });
 
-      setTotalPatentamientos(total);
-
-      // Anios disponibles
-      const sortedAnios = Array.from(aniosSet).sort((a, b) => b - a).map(String);
-      setAniosDisponibles(['TODOS', ...sortedAnios]);
-
-      // Top 10 marcas
-      const sortedMarcas = Object.entries(porMarca)
+      const sorted = Object.entries(agrupado)
         .map(([marca, cantidad]) => ({ marca, cantidad }))
         .sort((a, b) => b.cantidad - a.cantidad);
 
-      if (sortedMarcas.length > 0) {
-        setTopMarca({ nombre: sortedMarcas[0].marca, total: sortedMarcas[0].cantidad });
-        setChartData(sortedMarcas.slice(0, 10));
+      if (sorted.length > 0) {
+        setTopMarca({ nombre: sorted[0].marca, total: sorted[0].cantidad });
+        setChartData(sorted.slice(0, 10));
       }
     }
+
     setLoading(false);
   }, [selectedAnio]);
 
-  // Cargar tabla con paginación directa en Supabase (solo 12 filas por request)
+  // Carga de la tabla paginada en servidor
   const loadTableData = useCallback(async () => {
     setTableLoading(true);
     const from = (currentPage - 1) * pageSize;
@@ -117,7 +132,7 @@ export default function Dashboard() {
 
     if (!error && rows) {
       setTableData(rows);
-      setTotalCount(count || 0);
+      setTotalFilas(count || 0);
     }
     setTableLoading(false);
   }, [selectedAnio, searchTerm, currentPage]);
@@ -130,7 +145,7 @@ export default function Dashboard() {
     loadTableData();
   }, [loadTableData]);
 
-  const totalPages = Math.ceil(totalCount / pageSize) || 1;
+  const totalPages = Math.ceil(totalFilas / pageSize) || 1;
 
   return (
     <div className="min-h-screen p-6 md:p-10 max-w-7xl mx-auto space-y-8">
@@ -144,7 +159,7 @@ export default function Dashboard() {
             <h1 className="text-3xl font-bold tracking-tight text-white">Patentitas</h1>
           </div>
           <p className="text-slate-400 text-sm mt-1">
-            Análisis de patentamientos 0km en Argentina (DNRPA Datos Abiertos)
+            Parque automotor 0km en Argentina — Registro oficial DNRPA (2018–2026)
           </p>
         </div>
         <button
@@ -164,14 +179,14 @@ export default function Dashboard() {
       <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-sm font-medium">Patentamientos Registrados</span>
+            <span className="text-sm font-medium">Patentamientos Totales</span>
             <Layers className="w-5 h-5 text-blue-400" />
           </div>
           <p className="text-2xl font-bold text-white mt-2">
             {loading ? '...' : totalPatentamientos.toLocaleString('es-AR')}
           </p>
           <span className="text-xs text-slate-500 mt-1 block">
-            {selectedAnio === 'TODOS' ? 'Histórico acumulado' : `Año ${selectedAnio}`}
+            {selectedAnio === 'TODOS' ? 'Autos registrados (2018–2026)' : `Autos año ${selectedAnio}`}
           </span>
         </div>
 
@@ -190,17 +205,17 @@ export default function Dashboard() {
 
         <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-sm font-medium">Coincidencias en Búsqueda</span>
-            <Search className="w-5 h-5 text-purple-400" />
+            <span className="text-sm font-medium">Registros en Tabla</span>
+            <Database className="w-5 h-5 text-purple-400" />
           </div>
           <p className="text-2xl font-bold text-white mt-2">
-            {tableLoading ? '...' : totalCount.toLocaleString('es-AR')}
+            {tableLoading ? '...' : totalFilas.toLocaleString('es-AR')}
           </p>
-          <span className="text-xs text-slate-500 mt-1 block">Grupos de registros encontrados</span>
+          <span className="text-xs text-slate-500 mt-1 block">Lotes agregados coincidentes</span>
         </div>
       </section>
 
-      {/* Controles y Búsqueda */}
+      {/* Controles de Búsqueda y Filtros */}
       <section className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-slate-900/40 p-4 border border-slate-800 rounded-xl">
         <div className="sm:col-span-2">
           <label className="block text-xs font-semibold text-slate-400 mb-1">
@@ -222,7 +237,7 @@ export default function Dashboard() {
         </div>
 
         <div>
-          <label className="block text-xs font-semibold text-slate-400 mb-1">Filtrar Año</label>
+          <label className="block text-xs font-semibold text-slate-400 mb-1">Seleccionar Año</label>
           <div className="relative">
             <Calendar className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
             <select
@@ -235,7 +250,7 @@ export default function Dashboard() {
             >
               {aniosDisponibles.map((a) => (
                 <option key={a} value={a}>
-                  {a === 'TODOS' ? 'Todos los años' : a}
+                  {a === 'TODOS' ? 'Todos los años (2018–2026)' : a}
                 </option>
               ))}
             </select>
@@ -245,7 +260,9 @@ export default function Dashboard() {
 
       {/* Gráfico Top 10 */}
       <section className="bg-slate-900/60 border border-slate-800 rounded-xl p-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Top 10 Marcas ({selectedAnio === 'TODOS' ? 'Histórico' : selectedAnio})</h2>
+        <h2 className="text-lg font-semibold text-white mb-4">
+          Top 10 Marcas ({selectedAnio === 'TODOS' ? 'Histórico 2018–2026' : selectedAnio})
+        </h2>
         <div className="h-72 w-full">
           {chartData.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
@@ -268,12 +285,12 @@ export default function Dashboard() {
         </div>
       </section>
 
-      {/* Tabla con paginación remota */}
+      {/* Tabla Paginada */}
       <section className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
         <div className="p-4 border-b border-slate-800 flex justify-between items-center">
           <h2 className="text-lg font-semibold text-white">Detalle de Patentamientos</h2>
           <span className="text-xs text-slate-400">
-            Página {currentPage} de {totalPages} ({totalCount} filas)
+            Página {currentPage} de {totalPages} ({totalFilas.toLocaleString('es-AR')} combinaciones)
           </span>
         </div>
         <div className="overflow-x-auto">
@@ -315,7 +332,7 @@ export default function Dashboard() {
               ) : (
                 <tr>
                   <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
-                    No se encontraron registros coincidentes.
+                    No se encontraron registros.
                   </td>
                 </tr>
               )}
@@ -325,7 +342,7 @@ export default function Dashboard() {
 
         {/* Paginador */}
         <div className="p-4 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
-          <span>{totalCount.toLocaleString('es-AR')} resultados en total</span>
+          <span>{totalFilas.toLocaleString('es-AR')} filas registradas</span>
           <div className="flex gap-2">
             <button
               onClick={() => setCurrentPage((p) => Math.max(p - 1, 1))}
