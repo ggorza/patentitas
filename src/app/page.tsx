@@ -22,6 +22,9 @@ import {
   Calendar,
   Database,
   X,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react';
 
 interface Registro {
@@ -35,6 +38,8 @@ interface Registro {
   cantidad: number;
 }
 
+type SortColumn = 'periodo' | 'marca' | 'modelo' | 'origen' | 'provincia' | 'cantidad';
+
 export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [tableLoading, setTableLoading] = useState(false);
@@ -46,6 +51,10 @@ export default function Dashboard() {
   const [selectedAnio, setSelectedAnio] = useState('TODOS');
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 12;
+
+  // Ordenamiento
+  const [sortColumn, setSortColumn] = useState<SortColumn>('cantidad');
+  const [sortAscending, setSortAscending] = useState(false);
 
   // Métricas
   const [totalPatentamientos, setTotalPatentamientos] = useState(0);
@@ -108,7 +117,7 @@ export default function Dashboard() {
     setLoading(false);
   }, [selectedAnio]);
 
-  // Carga de la tabla paginada con conteo estimado para evitar timeouts
+  // Carga de la tabla con ordenamiento dinámico
   const loadTableData = useCallback(async () => {
     setTableLoading(true);
     const from = (currentPage - 1) * pageSize;
@@ -127,7 +136,16 @@ export default function Dashboard() {
       query = query.or(`marca.ilike.%${cleaned}%,modelo.ilike.%${cleaned}%`);
     }
 
-    query = query.order('cantidad', { ascending: false }).range(from, to);
+    // Aplicar orden dinámico
+    if (sortColumn === 'periodo') {
+      query = query
+        .order('anio', { ascending: sortAscending })
+        .order('mes', { ascending: sortAscending });
+    } else {
+      query = query.order(sortColumn, { ascending: sortAscending });
+    }
+
+    query = query.range(from, to);
 
     const { data: rows, count, error } = await query;
 
@@ -141,7 +159,7 @@ export default function Dashboard() {
     }
 
     setTableLoading(false);
-  }, [selectedAnio, searchTerm, currentPage]);
+  }, [selectedAnio, searchTerm, currentPage, sortColumn, sortAscending]);
 
   useEffect(() => {
     loadGlobalMetrics();
@@ -153,6 +171,30 @@ export default function Dashboard() {
     }, 300);
     return () => clearTimeout(handler);
   }, [loadTableData]);
+
+  // Manejar clic en encabezado para ordenar
+  const handleSort = (column: SortColumn) => {
+    if (sortColumn === column) {
+      setSortAscending(!sortAscending);
+    } else {
+      setSortColumn(column);
+      // Por defecto 'cantidad' y 'periodo' arrancan descendente, texto arranca ascendente
+      setSortAscending(column === 'marca' || column === 'modelo' || column === 'provincia' || column === 'origen');
+    }
+    setCurrentPage(1);
+  };
+
+  // Render del ícono de ordenamiento en el th
+  const renderSortIcon = (column: SortColumn) => {
+    if (sortColumn !== column) {
+      return <ArrowUpDown className="w-3.5 h-3.5 text-slate-600 group-hover:text-slate-400 transition" />;
+    }
+    return sortAscending ? (
+      <ArrowUp className="w-3.5 h-3.5 text-blue-400" />
+    ) : (
+      <ArrowDown className="w-3.5 h-3.5 text-blue-400" />
+    );
+  };
 
   const totalPages = Math.ceil(totalFilas / pageSize) || 1;
 
@@ -305,7 +347,7 @@ export default function Dashboard() {
         </div>
       </section>
 
-      {/* Tabla Paginada */}
+      {/* Tabla Paginada con Ordenamiento */}
       <section className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
         <div className="p-4 border-b border-slate-800 flex justify-between items-center">
           <h2 className="text-lg font-semibold text-white">Detalle de Patentamientos</h2>
@@ -315,14 +357,62 @@ export default function Dashboard() {
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm text-slate-300">
-            <thead className="bg-slate-950/60 text-xs uppercase text-slate-400 border-b border-slate-800">
+            <thead className="bg-slate-950/60 text-xs uppercase text-slate-400 border-b border-slate-800 select-none">
               <tr>
-                <th className="px-4 py-3">Período</th>
-                <th className="px-4 py-3">Marca</th>
-                <th className="px-4 py-3">Modelo</th>
-                <th className="px-4 py-3">Origen</th>
-                <th className="px-4 py-3">Provincia</th>
-                <th className="px-4 py-3 text-right">Cantidad</th>
+                <th
+                  onClick={() => handleSort('periodo')}
+                  className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span>Período</span>
+                    {renderSortIcon('periodo')}
+                  </div>
+                </th>
+                <th
+                  onClick={() => handleSort('marca')}
+                  className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span>Marca</span>
+                    {renderSortIcon('marca')}
+                  </div>
+                </th>
+                <th
+                  onClick={() => handleSort('modelo')}
+                  className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span>Modelo</span>
+                    {renderSortIcon('modelo')}
+                  </div>
+                </th>
+                <th
+                  onClick={() => handleSort('origen')}
+                  className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span>Origen</span>
+                    {renderSortIcon('origen')}
+                  </div>
+                </th>
+                <th
+                  onClick={() => handleSort('provincia')}
+                  className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span>Provincia</span>
+                    {renderSortIcon('provincia')}
+                  </div>
+                </th>
+                <th
+                  onClick={() => handleSort('cantidad')}
+                  className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group text-right"
+                >
+                  <div className="flex items-center justify-end gap-1.5">
+                    <span>Cantidad</span>
+                    {renderSortIcon('cantidad')}
+                  </div>
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
