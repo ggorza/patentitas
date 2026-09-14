@@ -28,25 +28,27 @@ import {
   ArrowUp,
   ArrowDown,
   MapPin,
+  SlidersHorizontal,
 } from 'lucide-react';
 
-interface Registro {
-  id?: number;
-  anio: number;
-  mes: number;
-  marca: string;
-  modelo: string;
-  origen: string;
-  provincia: string;
+interface RegistroAgrupado {
+  anio: number | null;
+  mes: number | null;
+  marca: string | null;
+  modelo: string | null;
+  origen: string | null;
+  provincia: string | null;
   cantidad: number;
+  total_grupos: number;
 }
 
-type SortColumn = 'periodo' | 'marca' | 'modelo' | 'origen' | 'provincia' | 'cantidad';
+type DimensionKey = 'periodo' | 'marca' | 'modelo' | 'origen' | 'provincia';
+type SortColumn = DimensionKey | 'cantidad';
 
 export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [tableLoading, setTableLoading] = useState(false);
-  const [tableData, setTableData] = useState<Registro[]>([]);
+  const [tableData, setTableData] = useState<RegistroAgrupado[]>([]);
   const [totalFilas, setTotalFilas] = useState(0);
 
   // Filtros
@@ -55,6 +57,9 @@ export default function Dashboard() {
   const [selectedProvincia, setSelectedProvincia] = useState('TODAS');
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 12;
+
+  // Agrupaciones activas (vacío = sin agrupar, muestra detalle plano)
+  const [activeGroups, setActiveGroups] = useState<DimensionKey[]>([]);
 
   // Ordenamiento
   const [sortColumn, setSortColumn] = useState<SortColumn>('cantidad');
@@ -70,7 +75,7 @@ export default function Dashboard() {
   const [barChartData, setBarChartData] = useState<{ marca: string; cantidad: number }[]>([]);
   const [lineChartData, setLineChartData] = useState<{ anio: number; cantidad: number }[]>([]);
 
-  // 1. Cargar opciones iniciales (años y provincias)
+  // 1. Cargar opciones iniciales
   useEffect(() => {
     async function initOptions() {
       const [aniosRes, provsRes] = await Promise.all([
@@ -89,7 +94,7 @@ export default function Dashboard() {
     initOptions();
   }, []);
 
-  // 2. Cargar KPIs y Gráficos mediante función RPC de Supabase (sin recortes)
+  // 2. Cargar KPIs y Gráficos mediante RPC
   const loadMetricsAndCharts = useCallback(async () => {
     setLoading(true);
 
@@ -113,7 +118,6 @@ export default function Dashboard() {
 
       setTotalPatentamientos(total);
 
-      // Top Marcas
       const sortedMarcas = Object.entries(porMarca)
         .map(([marca, cantidad]) => ({ marca, cantidad }))
         .sort((a, b) => b.cantidad - a.cantidad);
@@ -124,7 +128,6 @@ export default function Dashboard() {
       });
       setBarChartData(sortedMarcas.slice(0, 10));
 
-      // Evolución interanual completa
       const sortedAnios = Object.entries(porAnio)
         .map(([anio, cantidad]) => ({ anio: Number(anio), cantidad }))
         .sort((a, b) => a.anio - b.anio);
@@ -140,44 +143,32 @@ export default function Dashboard() {
     setLoading(false);
   }, [selectedAnio, selectedProvincia, searchTerm]);
 
-  // 3. Cargar tabla paginada con ordenamiento
+  // 3. Cargar tabla con agrupación y orden dinámico en PostgreSQL
   const loadTableData = useCallback(async () => {
     setTableLoading(true);
-    const from = (currentPage - 1) * pageSize;
-    const to = from + pageSize - 1;
+    const offset = (currentPage - 1) * pageSize;
 
-    let query = supabase.from('patentamientos_resumen').select('*', { count: 'estimated' });
-
-    if (selectedAnio !== 'TODOS') query = query.eq('anio', Number(selectedAnio));
-    if (selectedProvincia !== 'TODAS') query = query.eq('provincia', selectedProvincia);
-
-    const cleaned = searchTerm.trim();
-    if (cleaned.length > 0) {
-      query = query.or(`marca.ilike.%${cleaned}%,modelo.ilike.%${cleaned}%`);
-    }
-
-    if (sortColumn === 'periodo') {
-      query = query
-        .order('anio', { ascending: sortAscending })
-        .order('mes', { ascending: sortAscending });
-    } else {
-      query = query.order(sortColumn, { ascending: sortAscending });
-    }
-
-    query = query.range(from, to);
-
-    const { data: rows, count, error } = await query;
+    const { data: rows, error } = await supabase.rpc('agrupar_patentamientos', {
+      p_groupby: activeGroups.length > 0 ? activeGroups : null,
+      p_anio: selectedAnio === 'TODOS' ? null : Number(selectedAnio),
+      p_provincia: selectedProvincia === 'TODAS' ? null : selectedProvincia,
+      p_search: searchTerm.trim() === '' ? null : searchTerm.trim(),
+      p_sort_col: sortColumn,
+      p_sort_asc: sortAscending,
+      p_offset: offset,
+      p_limit: pageSize,
+    });
 
     if (!error && rows) {
       setTableData(rows);
-      setTotalFilas(count || rows.length);
+      setTotalFilas(rows.length > 0 ? Number(rows[0].total_grupos) : 0);
     } else {
       setTableData([]);
       setTotalFilas(0);
     }
 
     setTableLoading(false);
-  }, [selectedAnio, selectedProvincia, searchTerm, currentPage, sortColumn, sortAscending]);
+  }, [activeGroups, selectedAnio, selectedProvincia, searchTerm, currentPage, sortColumn, sortAscending]);
 
   useEffect(() => {
     const handler = setTimeout(() => {
@@ -187,12 +178,27 @@ export default function Dashboard() {
     return () => clearTimeout(handler);
   }, [loadMetricsAndCharts, loadTableData]);
 
+  // Manejador de checkboxes de agrupación
+  const toggleGroup = (dimension: DimensionKey) => {
+    setActiveGroups((prev) => {
+      const exists = prev.includes(dimension);
+      const next = exists ? prev.filter((d) => d !== dimension) : [...prev, dimension];
+      return next;
+    });
+    // Si ordenaba por una columna que se desactivó, fallback a cantidad
+    if (sortColumn === dimension && activeGroups.includes(dimension)) {
+      setSortColumn('cantidad');
+      setSortAscending(false);
+    }
+    setCurrentPage(1);
+  };
+
   const handleSort = (column: SortColumn) => {
     if (sortColumn === column) {
       setSortAscending(!sortAscending);
     } else {
       setSortColumn(column);
-      setSortAscending(column === 'marca' || column === 'modelo' || column === 'provincia' || column === 'origen');
+      setSortAscending(column !== 'cantidad' && column !== 'periodo');
     }
     setCurrentPage(1);
   };
@@ -206,6 +212,11 @@ export default function Dashboard() {
     ) : (
       <ArrowDown className="w-3.5 h-3.5 text-blue-400" />
     );
+  };
+
+  // Determinar visibilidad de columnas según checkboxes
+  const isColVisible = (dim: DimensionKey) => {
+    return activeGroups.length === 0 || activeGroups.includes(dim);
   };
 
   const totalPages = Math.ceil(totalFilas / pageSize) || 1;
@@ -266,13 +277,15 @@ export default function Dashboard() {
 
         <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-sm font-medium">Coincidencias en Base</span>
+            <span className="text-sm font-medium">Coincidencias / Grupos</span>
             <Database className="w-5 h-5 text-purple-400" />
           </div>
           <p className="text-2xl font-bold text-white mt-2">
             {tableLoading ? '...' : totalFilas.toLocaleString('es-AR')}
           </p>
-          <span className="text-xs text-slate-500 mt-1 block">Lotes de registros encontrados</span>
+          <span className="text-xs text-slate-500 mt-1 block">
+            {activeGroups.length > 0 ? `Agrupado por ${activeGroups.join(' + ')}` : 'Filas individuales'}
+          </span>
         </div>
       </section>
 
@@ -323,7 +336,7 @@ export default function Dashboard() {
               >
                 {aniosDisponibles.map((a) => (
                   <option key={a} value={a}>
-                    {a === 'TODOS' ? 'Todos los años (2018–2026)' : a}
+                    {a === 'TODOS' ? 'Todos los años' : a}
                   </option>
                 ))}
               </select>
@@ -411,69 +424,123 @@ export default function Dashboard() {
         </div>
       </section>
 
-      {/* Tabla Paginada con Ordenamiento */}
+      {/* Tabla Paginada con Agrupación Dinámica y Ordenamiento */}
       <section className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
-        <div className="p-4 border-b border-slate-800 flex justify-between items-center">
-          <h2 className="text-lg font-semibold text-white">Detalle de Patentamientos</h2>
-          <span className="text-xs text-slate-400">
-            Página {currentPage} de {totalPages}
-          </span>
+        {/* Barra superior de agrupación */}
+        <div className="p-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold text-white">Detalle de Patentamientos</h2>
+            <span className="text-xs text-slate-400">
+              Página {currentPage} de {totalPages} ({totalFilas.toLocaleString('es-AR')} {activeGroups.length > 0 ? 'grupos consolidados' : 'registros'})
+            </span>
+          </div>
+
+          {/* Checkboxes para agrupar */}
+          <div className="flex flex-wrap items-center gap-2 bg-slate-950/40 p-2 rounded-lg border border-slate-800 text-xs">
+            <div className="flex items-center gap-1.5 text-slate-400 font-medium mr-1">
+              <SlidersHorizontal className="w-3.5 h-3.5 text-blue-400" />
+              <span>Agrupar por:</span>
+            </div>
+            {(['periodo', 'marca', 'modelo', 'origen', 'provincia'] as DimensionKey[]).map((dim) => {
+              const active = activeGroups.includes(dim);
+              return (
+                <label
+                  key={dim}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded cursor-pointer transition select-none ${
+                    active
+                      ? 'bg-blue-600/20 text-blue-300 border border-blue-500/40 font-semibold'
+                      : 'bg-slate-800/60 text-slate-400 border border-slate-700/60 hover:bg-slate-800'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={active}
+                    onChange={() => toggleGroup(dim)}
+                    className="accent-blue-500 w-3 h-3 cursor-pointer"
+                  />
+                  <span className="capitalize">{dim}</span>
+                </label>
+              );
+            })}
+            {activeGroups.length > 0 && (
+              <button
+                onClick={() => {
+                  setActiveGroups([]);
+                  setCurrentPage(1);
+                }}
+                className="ml-1 text-[11px] text-slate-500 hover:text-slate-300 underline"
+              >
+                Limpiar
+              </button>
+            )}
+          </div>
         </div>
+
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm text-slate-300">
             <thead className="bg-slate-950/60 text-xs uppercase text-slate-400 border-b border-slate-800 select-none">
               <tr>
-                <th
-                  onClick={() => handleSort('periodo')}
-                  className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span>Período</span>
-                    {renderSortIcon('periodo')}
-                  </div>
-                </th>
-                <th
-                  onClick={() => handleSort('marca')}
-                  className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span>Marca</span>
-                    {renderSortIcon('marca')}
-                  </div>
-                </th>
-                <th
-                  onClick={() => handleSort('modelo')}
-                  className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span>Modelo</span>
-                    {renderSortIcon('modelo')}
-                  </div>
-                </th>
-                <th
-                  onClick={() => handleSort('origen')}
-                  className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span>Origen</span>
-                    {renderSortIcon('origen')}
-                  </div>
-                </th>
-                <th
-                  onClick={() => handleSort('provincia')}
-                  className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span>Provincia</span>
-                    {renderSortIcon('provincia')}
-                  </div>
-                </th>
+                {isColVisible('periodo') && (
+                  <th
+                    onClick={() => handleSort('periodo')}
+                    className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span>Período</span>
+                      {renderSortIcon('periodo')}
+                    </div>
+                  </th>
+                )}
+                {isColVisible('marca') && (
+                  <th
+                    onClick={() => handleSort('marca')}
+                    className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span>Marca</span>
+                      {renderSortIcon('marca')}
+                    </div>
+                  </th>
+                )}
+                {isColVisible('modelo') && (
+                  <th
+                    onClick={() => handleSort('modelo')}
+                    className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span>Modelo</span>
+                      {renderSortIcon('modelo')}
+                    </div>
+                  </th>
+                )}
+                {isColVisible('origen') && (
+                  <th
+                    onClick={() => handleSort('origen')}
+                    className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span>Origen</span>
+                      {renderSortIcon('origen')}
+                    </div>
+                  </th>
+                )}
+                {isColVisible('provincia') && (
+                  <th
+                    onClick={() => handleSort('provincia')}
+                    className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span>Provincia</span>
+                      {renderSortIcon('provincia')}
+                    </div>
+                  </th>
+                )}
                 <th
                   onClick={() => handleSort('cantidad')}
                   className="px-4 py-3 cursor-pointer hover:bg-slate-800/60 hover:text-white transition group text-right"
                 >
                   <div className="flex items-center justify-end gap-1.5">
-                    <span>Cantidad</span>
+                    <span>{activeGroups.length > 0 ? 'Total Unidades' : 'Cantidad'}</span>
                     {renderSortIcon('cantidad')}
                   </div>
                 </th>
@@ -483,23 +550,37 @@ export default function Dashboard() {
               {tableLoading ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
-                    Buscando en la base de datos...
+                    Procesando agregación en base de datos...
                   </td>
                 </tr>
               ) : tableData.length > 0 ? (
                 tableData.map((row, idx) => (
                   <tr key={idx} className="hover:bg-slate-800/30 transition">
-                    <td className="px-4 py-3 text-slate-400">{row.mes}/{row.anio}</td>
-                    <td className="px-4 py-3 font-medium text-white">{row.marca}</td>
-                    <td className="px-4 py-3">{row.modelo}</td>
-                    <td className="px-4 py-3 text-xs">
-                      <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300">
-                        {row.origen}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">{row.provincia}</td>
+                    {isColVisible('periodo') && (
+                      <td className="px-4 py-3 text-slate-400">
+                        {row.anio ? `${row.mes}/${row.anio}` : '-'}
+                      </td>
+                    )}
+                    {isColVisible('marca') && (
+                      <td className="px-4 py-3 font-medium text-white">{row.marca || '-'}</td>
+                    )}
+                    {isColVisible('modelo') && (
+                      <td className="px-4 py-3">{row.modelo || '-'}</td>
+                    )}
+                    {isColVisible('origen') && (
+                      <td className="px-4 py-3 text-xs">
+                        {row.origen ? (
+                          <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300">
+                            {row.origen}
+                          </span>
+                        ) : '-'}
+                      </td>
+                    )}
+                    {isColVisible('provincia') && (
+                      <td className="px-4 py-3">{row.provincia || '-'}</td>
+                    )}
                     <td className="px-4 py-3 text-right font-semibold text-blue-400">
-                      {row.cantidad.toLocaleString('es-AR')}
+                      {Number(row.cantidad).toLocaleString('es-AR')}
                     </td>
                   </tr>
                 ))
@@ -516,7 +597,7 @@ export default function Dashboard() {
 
         {/* Paginador */}
         <div className="p-4 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
-          <span>{totalFilas.toLocaleString('es-AR')} combinaciones encontradas</span>
+          <span>{totalFilas.toLocaleString('es-AR')} resultados en total</span>
           <div className="flex gap-2">
             <button
               onClick={() => setCurrentPage((p) => Math.max(p - 1, 1))}
