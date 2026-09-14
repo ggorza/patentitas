@@ -2,6 +2,7 @@ import os
 import re
 import zipfile
 import tempfile
+import traceback
 import requests
 import duckdb
 from supabase import create_client
@@ -17,7 +18,6 @@ CKAN_PACKAGE_URL = "https://datos.jus.gob.ar/api/3/action/package_show?id=inscri
 
 
 def obtener_ultimo_archivo():
-    """Consulta la API de Datos Abiertos de Justicia para obtener el recurso más reciente."""
     print("Consultando API CKAN de datos.jus.gob.ar...")
     resp = requests.get(CKAN_PACKAGE_URL, timeout=30)
     resp.raise_for_status()
@@ -44,7 +44,6 @@ def obtener_ultimo_archivo():
 
 
 def descargar_y_obtener_csv(url: str, temp_dir: str) -> str:
-    """Descarga el recurso y, si es un zip, extrae el archivo CSV contenido."""
     local_path = os.path.join(temp_dir, "descarga_dnrpa")
     print(f"Descargando archivo desde: {url}...")
     
@@ -57,7 +56,6 @@ def descargar_y_obtener_csv(url: str, temp_dir: str) -> str:
     
     print("Descarga finalizada.")
 
-    # Si es ZIP, descomprimir y buscar el CSV
     if url.endswith(".zip") or zipfile.is_zipfile(local_path):
         print("Descomprimiendo archivo ZIP...")
         with zipfile.ZipFile(local_path, "r") as z:
@@ -73,44 +71,80 @@ def descargar_y_obtener_csv(url: str, temp_dir: str) -> str:
 
 
 def procesar_y_cargar(ruta_csv_local: str):
-    """Procesa el CSV local con DuckDB, agrupa los datos y los sube a Supabase."""
-    print(f"Iniciando procesamiento DuckDB sobre: {ruta_csv_local}")
+    print(f"Iniciando inspección y procesamiento DuckDB sobre: {ruta_csv_local}")
     con = duckdb.connect(database=":memory:")
     
-    query = f"""
-        SELECT 
-            YEAR(TRY_CAST(tramite_fecha AS DATE)) AS anio,
-            MONTH(TRY_CAST(tramite_fecha AS DATE)) AS mes,
-            UPPER(TRIM(automotor_marca_descripcion)) AS marca,
-            COALESCE(UPPER(TRIM(automotor_modelo_descripcion)), 'SIN ESPECIFICAR') AS modelo,
-            COALESCE(automotor_origen, 'Sin Dato') AS origen,
-            COALESCE(UPPER(TRIM(titular_radicacion_provincia)), 'NO ESPECIFICADA') AS provincia,
-            COUNT(*) AS cantidad
-        FROM read_csv_auto('{ruta_csv_local}', ignore_errors=true)
-        WHERE tramite_fecha IS NOT NULL 
-          AND automotor_marca_descripcion IS NOT NULL
-          AND TRY_CAST(tramite_fecha AS DATE) IS NOT NULL
-        GROUP BY 1, 2, 3, 4, 5, 6
-    """
-    
-    df_resumen = con.execute(query).fetchdf()
-    con.close()
-    
-    total_filas = len(df_resumen)
-    print(f"Procesamiento finalizado. Filas agrupadas a insertar: {total_filas}")
-    
-    if total_filas == 0:
-        print("No se generaron registros. Verificá los encabezados del archivo.")
-        return
+    try:
+        print("Mapeando columnas del CSV...")
+        df_muestra = con.execute(
+            f"SELECT * FROM read_csv_auto('{ruta_csv_local}', sample_size=5000, ignore_errors=true) LIMIT 3"
+        ).fetchdf()
+        columnas_reales = [str(c).lower() for c in df_muestra.columns]
+        print(f"Columnas detectadas en el CSV: {columnas_reales}")
 
-    registros = df_resumen.to_dict(orient="records")
-    tamano_batch = 1000
-    for i in range(0, total_filas, tamano_batch):
-        batch = registros[i:i + tamano_batch]
-        supabase.table("patentamientos_resumen").insert(batch).execute()
-        print(f"Insertados {min(i + tamano_batch, total_filas)}/{total_filas} registros...")
+        col_fecha = next((c for c in df_muestra.columns if 'fecha' in c.lower()), 'tramite_fecha')
+        col_marca = next((c for c in df_muestra.columns if 'marca' in c.lower()), 'automotor_marca_descripcion')
+        col_modelo = next((c for c in df_muestra.columns if 'modelo' in c.lower()), 'automotor_modelo_descripcion')
+        col_origen = next((c for c in df_muestra.columns if 'origen' in c.lower()), 'automotor_origen')
+        col_prov = next((c for c in df_muestra.columns if 'provincia' in c.lower()), 'titular_radicacion_provincia')
 
-    print("Carga completa en Supabase con éxito.")
+        print(f"Columnas mapeadas -> Fecha: {col_fecha}, Marca: {col_marca}, Modelo: {col_modelo}, Origen: {col_origen}, Prov: {col_prov}")
+
+        query = (
+            "WITH raw_data AS ("
+            "    SELECT "
+            f"       COALESCE("
+            f"           TRY_CAST(\"{col_fecha}\" AS DATE),"
+            f"           TRY_STRPTIME(\"{col_fecha}\", '%Y-%m-%d'),"
+            f"           TRY_STRPTIME(\"{col_fecha}\", '%d/%m/%Y'),"
+            f"           TRY_STRPTIME(\"{col_fecha}\", '%Y%m%d')"
+            "       ) AS fecha_parsed,"
+            f"       UPPER(TRIM(\"{col_marca}\")) AS marca,"
+            f"       COALESCE(UPPER(TRIM(\"{col_modelo}\")), 'SIN ESPECIFICAR') AS modelo,"
+            f"       COALESCE(\"{col_origen}\", 'Sin Dato') AS origen,"
+            f"       COALESCE(UPPER(TRIM(\"{col_prov}\")), 'NO ESPECIFICADA') AS provincia "
+            f"   FROM read_csv_auto('{ruta_csv_local}', sample_size=5000, ignore_errors=true)"
+            ") "
+            "SELECT "
+            "    CAST(YEAR(fecha_parsed) AS INT) AS anio, "
+            "    CAST(MONTH(fecha_parsed) AS INT) AS mes, "
+            "    marca, "
+            "    modelo, "
+            "    origen, "
+            "    provincia, "
+            "    CAST(COUNT(*) AS INT) AS cantidad "
+            "FROM raw_data "
+            "WHERE fecha_parsed IS NOT NULL "
+            "  AND marca IS NOT NULL "
+            "  AND marca != '' "
+            "GROUP BY 1, 2, 3, 4, 5, 6"
+        )
+        
+        print("Ejecutando consulta de agregación...")
+        df_resumen = con.execute(query).fetchdf()
+        
+        total_filas = len(df_resumen)
+        print(f"Procesamiento finalizado. Filas agrupadas a insertar: {total_filas}")
+        
+        if total_filas == 0:
+            print("AVISO: No se generaron registros. Verificá el formato de las fechas.")
+            return
+
+        registros = df_resumen.to_dict(orient="records")
+        tamano_batch = 1000
+        for i in range(0, total_filas, tamano_batch):
+            batch = registros[i:i + tamano_batch]
+            supabase.table("patentamientos_resumen").insert(batch).execute()
+            print(f"Insertados {min(i + tamano_batch, total_filas)}/{total_filas} registros...")
+
+        print("Carga completa en Supabase con éxito.")
+
+    except Exception as e:
+        print("ERROR CRÍTICO durante el procesamiento o inserción:")
+        traceback.print_exc()
+        raise e
+    finally:
+        con.close()
 
 
 if __name__ == "__main__":
