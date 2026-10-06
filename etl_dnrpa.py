@@ -155,7 +155,7 @@ if __name__ == "__main__":
 
     # Purgar tabla para evitar duplicar datos de corridas anteriores
     print("Vaciando tabla patentamientos_resumen para carga completa limpia...")
-    supabase.table("patentamientos_resumen").delete().neq("id", 0).execute()
+    supabase.rpc("truncar_patentamientos", {}).execute()
 
     for item in archivos:
         print(f"\nProcesando recurso: {item['name']} ({item['anio']})")
